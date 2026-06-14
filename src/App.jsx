@@ -16,7 +16,7 @@ const PRO_SCALE      = 2;   // 2× retina for pro
 
 // !! REPLACE THIS with your actual Polar.sh product checkout URL
 // Get it from: polar.sh → Products → your product → "Buy" button URL
-const POLAR_CHECKOUT_URL = "https://buy.polar.sh/REPLACE_WITH_YOUR_PRODUCT_ID";
+const POLAR_CHECKOUT_URL = "https://buy.polar.sh/polar_cl_oeLifbHWcFZb6E5gss5PW6puaPVYMZ8fdcKuB4G96sZ";
 
 const LS_PRO_KEY     = "perspecto_pro";      // localStorage keys
 const LS_EXPORT_KEY  = "perspecto_exports";
