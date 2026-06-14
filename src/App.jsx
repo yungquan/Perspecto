@@ -1107,7 +1107,7 @@ export default function App() {
 
         /* ── ACTIONS BUTTON + DROPDOWN ──────────── */
         .actions-wrap{position:absolute;top:12px;right:14px;z-index:25;
-          display:flex;align-items:center;gap:8px}
+          display:flex;align-items:center;gap:8px;outline:none;border:none;background:none}
 
         .actions-btn{display:flex;align-items:center;gap:7px;padding:9px 18px;
           background:rgba(22,22,40,.97);border:1px solid #5858b0;border-radius:20px;
