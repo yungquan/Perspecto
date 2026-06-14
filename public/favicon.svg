@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <rect width="32" height="32" rx="7" fill="#0d0d10"/>
+  <!-- Back layer -->
+  <rect x="7" y="7" width="15" height="10" rx="2"
+    fill="none" stroke="#3730a3" stroke-width="1.2" opacity="0.5"
+    transform="translate(2, 2) perspective(60px) rotateX(12deg) rotateY(-18deg)"/>
+  <!-- Base layer -->
+  <rect x="7" y="10" width="15" height="10" rx="2"
+    fill="#1a1a40" stroke="#4f46e5" stroke-width="1.5"
+    transform="perspective(60px) rotateX(12deg) rotateY(-18deg)"/>
+  <!-- Top layer -->
+  <rect x="7" y="13" width="15" height="10" rx="2"
+    fill="none" stroke="#818cf8" stroke-width="1" opacity="0.6"
+    transform="translate(-2, -2) perspective(60px) rotateX(12deg) rotateY(-18deg)"/>
+</svg>
