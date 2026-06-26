@@ -2,24 +2,50 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import {
   RotateCcw, Upload, ImageIcon, Layers, Sliders, Eye,
   Download, Share2, X, Loader, Droplets, Monitor,
-  Undo2, ZoomIn, ChevronRight, Code2, Copy, ClipboardCopy,
+  Undo2, Redo2, ZoomIn, ChevronRight, Code2, Copy, ClipboardCopy,
   Lock, Sparkles, CheckCircle2, Link2, ChevronDown, Zap,
+  BookmarkPlus, Bookmark, Trash2, Package, Type, Palette,
+  Smartphone, Globe, LayoutDashboard,
 } from "lucide-react";
 
 // ─────────────────────────────────────────────────────────────
 // FREEMIUM CONFIG
 // ─────────────────────────────────────────────────────────────
 
-const FREE_EXPORTS   = 3;   // exports before paywall
-const FREE_SCALE     = 1;   // 1× resolution for free
-const PRO_SCALE      = 2;   // 2× retina for pro
+const FREE_EXPORTS   = 5;   // exports before paywall
+const FREE_SCALE     = 1;   // 1x resolution for free
+const PRO_SCALE      = 2;   // 2x retina for pro
+
+// Only slider-driven keys need string-to-number coercion in set().
+// String values like exportBg, exportBgColor, customWatermark must pass through untouched.
+const NUMERIC_KEYS = new Set([
+  "perspective","rotateX","rotateY","rotateZ","shadowIntensity",
+  "layerSep","bgBlur","curveIntensity","zoom",
+]);
+
+// The main transform & layer-effect keys that participate in undo/redo history.
+// Export settings (background, watermark, resolution) are intentionally excluded -
+// those are one-off choices, not something you'd want to step back through while
+// experimenting with an angle.
+const HISTORY_KEYS = [
+  "perspective","rotateX","rotateY","rotateZ","shadowIntensity",
+  "layerSep","bgBlur","glassBorder","showFrame","curveScreen","curveIntensity",
+];
+const MAX_HISTORY = 30;
 
 // !! REPLACE THIS with your actual Polar.sh product checkout URL
 // Get it from: polar.sh → Products → your product → "Buy" button URL
 const POLAR_CHECKOUT_URL = "https://buy.polar.sh/polar_cl_oeLifbHWcFZb6E5gss5PW6puaPVYMZ8fdcKuB4G96sZ";
 
-const LS_PRO_KEY     = "perspecto_pro";      // localStorage keys
-const LS_EXPORT_KEY  = "perspecto_exports";
+const LS_PRO_KEY      = "perspecto_pro";
+const LS_EXPORT_KEY   = "perspecto_exports";
+const LS_PRESETS_KEY  = "perspecto_saved_presets";
+
+const EXPORT_SCALES = [
+  { label: "1×", value: 1, pro: false },
+  { label: "2×", value: 2, pro: true  },
+  { label: "4×", value: 4, pro: true  },
+];
 
 // ─────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -38,7 +64,10 @@ const DEFAULTS = {
   curveScreen: false,
   curveIntensity: 40,
   showWatermark: true,
+  customWatermark: "",
   exportBg: "transparent",
+  exportBgColor: "#1a1a2e",
+  exportScale: 2,
   zoom: 100,
 };
 
@@ -66,9 +95,9 @@ const L_SLIDERS = [
 ];
 
 // ─────────────────────────────────────────────────────────────
-// DEMO IMAGE — fake SaaS dashboard SVG embedded as data URL
+// DEMO IMAGE - fake SaaS dashboard SVG embedded as data URL
 // ─────────────────────────────────────────────────────────────
-const DEMO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+const DEMO_SVG_DASHBOARD = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
   <rect width="1280" height="800" fill="#0a0a14"/>
   <!-- Sidebar -->
   <rect width="220" height="800" fill="#0f0f1c"/>
@@ -177,10 +206,151 @@ const DEMO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="8
   <polyline points="260,690 340,670 420,678 500,658 580,665 660,642 740,650 820,628 900,636 980,610 1060,618 1140,595" fill="none" stroke="#818cf8" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" opacity=".55"/>
 </svg>`;
 
-const DEMO_URL = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEMO_SVG)}`;
+const DEMO_SVG_MOBILE = `<svg xmlns="http://www.w3.org/2000/svg" width="430" height="900" viewBox="0 0 430 900">
+  <rect width="430" height="900" fill="#0a0a14"/>
+  <!-- Status bar -->
+  <rect x="0" y="0" width="430" height="44" fill="#0a0a14"/>
+  <rect x="32" y="18" width="40" height="9" rx="4" fill="#e0e0f8"/>
+  <rect x="330" y="17" width="22" height="11" rx="3" fill="#50508a"/>
+  <rect x="358" y="17" width="22" height="11" rx="3" fill="#50508a"/>
+  <rect x="386" y="16" width="26" height="12" rx="3" fill="#e0e0f8"/>
+  <!-- Header -->
+  <rect x="28" y="64" width="160" height="20" rx="6" fill="#e0e0f8"/>
+  <rect x="28" y="92" width="110" height="10" rx="5" fill="#50508a"/>
+  <rect x="362" y="62" width="40" height="40" rx="20" fill="#1a1a38"/>
+  <!-- Search bar -->
+  <rect x="28" y="124" width="374" height="46" rx="14" fill="#13132390"/>
+  <rect x="28" y="124" width="374" height="46" rx="14" fill="none" stroke="#262644" stroke-width="1.5"/>
+  <rect x="48" y="142" width="14" height="14" rx="7" fill="none" stroke="#5a5a90" stroke-width="2"/>
+  <rect x="72" y="147" width="110" height="7" rx="3" fill="#50508a"/>
+  <!-- Hero card -->
+  <rect x="28" y="192" width="374" height="170" rx="18" fill="#4f46e5"/>
+  <rect x="28" y="192" width="374" height="170" rx="18" fill="url(#g1)" opacity="0.5"/>
+  <defs>
+    <linearGradient id="g1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#4f46e5" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect x="52" y="222" width="180" height="16" rx="6" fill="#fff" opacity=".95"/>
+  <rect x="52" y="248" width="240" height="10" rx="5" fill="#fff" opacity=".7"/>
+  <rect x="52" y="264" width="200" height="10" rx="5" fill="#fff" opacity=".7"/>
+  <rect x="52" y="304" width="110" height="36" rx="11" fill="#fff"/>
+  <rect x="72" y="318" width="70" height="9" rx="4" fill="#4f46e5"/>
+  <!-- Section title -->
+  <rect x="28" y="392" width="130" height="16" rx="6" fill="#e0e0f8"/>
+  <rect x="364" y="396" width="38" height="9" rx="4" fill="#6a6ab0"/>
+  <!-- Card row -->
+  <rect x="28" y="424" width="178" height="148" rx="14" fill="#0f0f1c"/>
+  <rect x="44" y="440" width="146" height="80" rx="10" fill="#1a1a38"/>
+  <rect x="44" y="436" width="60" height="36" rx="9" fill="#22c55e" opacity=".25"/>
+  <rect x="44" y="532" width="110" height="10" rx="5" fill="#e0e0f8"/>
+  <rect x="44" y="548" width="70" height="8" rx="4" fill="#50508a"/>
+  <rect x="224" y="424" width="178" height="148" rx="14" fill="#0f0f1c"/>
+  <rect x="240" y="440" width="146" height="80" rx="10" fill="#1a1a38"/>
+  <rect x="240" y="436" width="60" height="36" rx="9" fill="#f59e0b" opacity=".25"/>
+  <rect x="240" y="532" width="120" height="10" rx="5" fill="#e0e0f8"/>
+  <rect x="240" y="548" width="60" height="8" rx="4" fill="#50508a"/>
+  <!-- List items -->
+  <rect x="28" y="596" width="374" height="76" rx="14" fill="#0f0f1c"/>
+  <rect x="44" y="612" width="44" height="44" rx="12" fill="#1e1e3a"/>
+  <rect x="100" y="616" width="160" height="10" rx="5" fill="#e0e0f8"/>
+  <rect x="100" y="634" width="110" height="8" rx="4" fill="#50508a"/>
+  <rect x="360" y="624" width="30" height="20" rx="6" fill="#4f46e5" opacity=".85"/>
+  <rect x="28" y="684" width="374" height="76" rx="14" fill="#0f0f1c"/>
+  <rect x="44" y="700" width="44" height="44" rx="12" fill="#1e1e3a"/>
+  <rect x="100" y="704" width="180" height="10" rx="5" fill="#e0e0f8"/>
+  <rect x="100" y="722" width="90" height="8" rx="4" fill="#50508a"/>
+  <rect x="360" y="712" width="30" height="20" rx="6" fill="#22c55e" opacity=".85"/>
+  <!-- Bottom nav -->
+  <rect x="0" y="816" width="430" height="84" fill="#0e0e1a"/>
+  <rect x="0" y="816" width="430" height="1" fill="#1e1e34"/>
+  <circle cx="80" cy="858" r="4" fill="#4f46e5"/>
+  <rect x="64" y="838" width="32" height="22" rx="6" fill="#4f46e5"/>
+  <rect x="184" y="838" width="32" height="22" rx="6" fill="#32325a"/>
+  <circle cx="200" cy="858" r="4" fill="#50508a"/>
+  <rect x="304" y="838" width="32" height="22" rx="6" fill="#32325a"/>
+  <circle cx="320" cy="858" r="4" fill="#50508a"/>
+  <rect x="364" y="836" width="40" height="26" rx="13" fill="#32325a"/>
+</svg>`;
+
+const DEMO_SVG_WEBSITE = `<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="800" viewBox="0 0 1280 800">
+  <rect width="1280" height="800" fill="#0a0a14"/>
+  <!-- Nav -->
+  <rect x="0" y="0" width="1280" height="76" fill="#0a0a14"/>
+  <rect x="0" y="75" width="1280" height="1" fill="#1e1e34"/>
+  <rect x="56" y="28" width="30" height="30" rx="8" fill="#4f46e5"/>
+  <rect x="98" y="33" width="100" height="11" rx="5" fill="#e0e0f8"/>
+  <rect x="520" y="34" width="60" height="9" rx="4" fill="#7070a8"/>
+  <rect x="610" y="34" width="60" height="9" rx="4" fill="#7070a8"/>
+  <rect x="700" y="34" width="60" height="9" rx="4" fill="#7070a8"/>
+  <rect x="790" y="34" width="60" height="9" rx="4" fill="#7070a8"/>
+  <rect x="1090" y="22" width="100" height="36" rx="9" fill="none" stroke="#3a3a70" stroke-width="1.5"/>
+  <rect x="1112" y="35" width="56" height="9" rx="4" fill="#c0c0e8"/>
+  <rect x="1206" y="22" width="100" height="36" rx="9" fill="#4f46e5" opacity="0"/>
+  <!-- Hero -->
+  <rect x="56" y="148" width="540" height="26" rx="8" fill="#1e1e3a"/>
+  <rect x="72" y="156" width="10" height="10" rx="5" fill="#22c55e"/>
+  <rect x="92" y="158" width="160" height="9" rx="4" fill="#a8e0b8"/>
+  <rect x="56" y="206" width="600" height="40" rx="10" fill="#f4f4fc"/>
+  <rect x="56" y="256" width="500" height="40" rx="10" fill="#f4f4fc"/>
+  <rect x="56" y="320" width="440" height="12" rx="6" fill="#7070a8"/>
+  <rect x="56" y="344" width="380" height="12" rx="6" fill="#7070a8"/>
+  <rect x="56" y="368" width="410" height="12" rx="6" fill="#7070a8"/>
+  <rect x="56" y="416" width="160" height="50" rx="12" fill="#4f46e5"/>
+  <rect x="84" y="434" width="104" height="14" rx="5" fill="#fff" opacity=".95"/>
+  <rect x="232" y="416" width="160" height="50" rx="12" fill="none" stroke="#3a3a70" stroke-width="1.5"/>
+  <rect x="260" y="434" width="104" height="14" rx="5" fill="#c0c0e8"/>
+  <!-- Hero visual -->
+  <rect x="676" y="148" width="548" height="370" rx="20" fill="#0f0f1c"/>
+  <rect x="676" y="148" width="548" height="56" rx="20" fill="#141428"/>
+  <circle cx="706" cy="176" r="6" fill="#ff5f57"/>
+  <circle cx="728" cy="176" r="6" fill="#ffbd2e"/>
+  <circle cx="750" cy="176" r="6" fill="#28c841"/>
+  <rect x="712" y="232" width="100" height="100" rx="14" fill="#4f46e5" opacity=".85"/>
+  <rect x="828" y="232" width="100" height="100" rx="14" fill="#1e1e3a"/>
+  <rect x="944" y="232" width="100" height="100" rx="14" fill="#1e1e3a"/>
+  <rect x="712" y="352" width="332" height="20" rx="6" fill="#262644"/>
+  <rect x="712" y="384" width="260" height="14" rx="5" fill="#50508a"/>
+  <rect x="712" y="410" width="290" height="14" rx="5" fill="#50508a"/>
+  <rect x="712" y="448" width="130" height="38" rx="10" fill="#4f46e5"/>
+  <!-- Feature row -->
+  <rect x="56" y="568" width="368" height="180" rx="16" fill="#0f0f1c"/>
+  <rect x="84" y="596" width="48" height="48" rx="12" fill="#4f46e5" opacity=".25"/>
+  <rect x="84" y="664" width="160" height="13" rx="5" fill="#e0e0f8"/>
+  <rect x="84" y="690" width="280" height="9" rx="4" fill="#50508a"/>
+  <rect x="84" y="706" width="240" height="9" rx="4" fill="#50508a"/>
+  <rect x="456" y="568" width="368" height="180" rx="16" fill="#0f0f1c"/>
+  <rect x="484" y="596" width="48" height="48" rx="12" fill="#f59e0b" opacity=".25"/>
+  <rect x="484" y="664" width="180" height="13" rx="5" fill="#e0e0f8"/>
+  <rect x="484" y="690" width="270" height="9" rx="4" fill="#50508a"/>
+  <rect x="484" y="706" width="230" height="9" rx="4" fill="#50508a"/>
+  <rect x="856" y="568" width="368" height="180" rx="16" fill="#0f0f1c"/>
+  <rect x="884" y="596" width="48" height="48" rx="12" fill="#22c55e" opacity=".25"/>
+  <rect x="884" y="664" width="150" height="13" rx="5" fill="#e0e0f8"/>
+  <rect x="884" y="690" width="260" height="9" rx="4" fill="#50508a"/>
+  <rect x="884" y="706" width="220" height="9" rx="4" fill="#50508a"/>
+</svg>`;
+
+const DEMO_URL_DASHBOARD = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEMO_SVG_DASHBOARD)}`;
+const DEMO_URL_MOBILE    = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEMO_SVG_MOBILE)}`;
+const DEMO_URL_WEBSITE   = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(DEMO_SVG_WEBSITE)}`;
+
+const DEMOS = [
+  { id: "dashboard", label: "Dashboard", url: DEMO_URL_DASHBOARD },
+  { id: "mobile",    label: "Mobile App", url: DEMO_URL_MOBILE },
+  { id: "website",   label: "Website",   url: DEMO_URL_WEBSITE },
+];
+
+// Icons are attached at module scope after the icon imports, used by the demo picker UI.
+const DEMO_PICKS = [
+  { id: "dashboard", label: "Dashboard",  icon: LayoutDashboard },
+  { id: "mobile",    label: "Mobile App", icon: Smartphone },
+  { id: "website",   label: "Website",    icon: Globe },
+];
 
 // ─────────────────────────────────────────────────────────────
-// EXPORT ENGINE — custom Canvas 2D renderer with real 3D math
+// EXPORT ENGINE - custom Canvas 2D renderer with real 3D math
 // Replaces html2canvas entirely. Produces pixel-perfect output.
 // ─────────────────────────────────────────────────────────────
 
@@ -306,15 +476,27 @@ function drawCheckerBg(ctx, w, h, light, dark) {
     }
 }
 
-async function renderExport({ imgEl, ctrl, showWatermark, scale=2 }) {
+async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWatermark="" }) {
   const { perspective:P, rotateX, rotateY, rotateZ,
-          shadowIntensity, layerSep, showFrame, exportBg } = ctrl;
+          shadowIntensity, layerSep, showFrame, exportBg, exportBgColor } = ctrl;
 
   const src = buildSourceCanvas(imgEl, showFrame);
   const ar = src.width / src.height;
-  const MAX = 700;
-  const dispW = ar>=1 ? Math.min(src.width, MAX) : Math.min(src.height, MAX)*ar;
-  const dispH = ar>=1 ? dispW/ar : Math.min(src.height, MAX);
+  // Base resolution cap - matches typical high-res screenshots far better than
+  // the old 700px cap, which was silently downscaling every export regardless
+  // of free/Pro tier or how large the original upload actually was.
+  const MAX = 1800;
+  let dispW = ar>=1 ? Math.min(src.width, MAX) : Math.min(src.height, MAX)*ar;
+  let dispH = ar>=1 ? dispW/ar : Math.min(src.height, MAX);
+  // Safety ceiling on the final multiplied canvas size, so a very large upload
+  // combined with 4x export can't push past what browsers can safely render.
+  const HARD_CEILING = 6000;
+  const projectedLongEdge = Math.max(dispW, dispH) * scale;
+  if (projectedLongEdge > HARD_CEILING) {
+    const clamp = HARD_CEILING / projectedLongEdge;
+    dispW *= clamp;
+    dispH *= clamp;
+  }
   const PAD = 150;
   const cW = Math.round((dispW + PAD*2) * scale);
   const cH = Math.round((dispH + PAD*2) * scale);
@@ -330,6 +512,16 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2 }) {
   } else if (exportBg === "light") {
     ctx.fillStyle = "#f4f4f6"; ctx.fillRect(0,0,cW,cH);
     drawCheckerBg(ctx, cW, cH, "#ebebee", "#e2e2e6");
+  } else if (exportBg === "color") {
+    ctx.fillStyle = exportBgColor || "#1a1a2e";
+    ctx.fillRect(0,0,cW,cH);
+  } else if (exportBg === "gradient") {
+    const grad = ctx.createLinearGradient(0, 0, cW, cH);
+    const base = exportBgColor || "#1a1a2e";
+    grad.addColorStop(0, base);
+    grad.addColorStop(1, shadeColor(base, -28));
+    ctx.fillStyle = grad;
+    ctx.fillRect(0,0,cW,cH);
   }
 
   const gc = (tz) => getCorners(dispW, dispH, tz, rotateX, rotateY, rotateZ, P, cx, cy, scale);
@@ -368,19 +560,32 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2 }) {
       "brightness(1.6) saturate(0.3)", 8);
   }
 
-  // Watermark
+  // Watermark - custom text for Pro users, default for free
   if (showWatermark) {
+    const text = (customWatermark && customWatermark.trim()) ? customWatermark.trim() : "via Perspecto";
     const fs = 11 * scale;
     ctx.save();
     ctx.font = `500 ${fs}px 'IBM Plex Mono', monospace`;
-    ctx.fillStyle = exportBg === "light" ? "rgba(0,0,0,0.4)" : "rgba(255,255,255,0.55)";
+    ctx.fillStyle = (exportBg === "light") ? "rgba(0,0,0,0.4)" : "rgba(255,255,255,0.55)";
     ctx.textAlign = "right";
     ctx.textBaseline = "bottom";
-    ctx.fillText("via Perspecto", cW - 18*scale, cH - 14*scale);
+    ctx.fillText(text, cW - 18*scale, cH - 14*scale);
     ctx.restore();
   }
 
   return canvas;
+}
+
+// Small helper - darken/lighten a hex color by percent (-100 to 100)
+function shadeColor(hex, percent) {
+  let h = hex.replace("#","");
+  if (h.length === 3) h = h.split("").map(c=>c+c).join("");
+  const num = parseInt(h, 16);
+  let r = (num >> 16), g = (num >> 8 & 0x00FF), b = (num & 0x0000FF);
+  r = Math.max(0, Math.min(255, Math.round(r + (percent/100)*255)));
+  g = Math.max(0, Math.min(255, Math.round(g + (percent/100)*255)));
+  b = Math.max(0, Math.min(255, Math.round(b + (percent/100)*255)));
+  return `#${(r<16?"0":"")+r.toString(16)}${(g<16?"0":"")+g.toString(16)}${(b<16?"0":"")+b.toString(16)}`;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -389,6 +594,13 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2 }) {
 
 export default function App() {
   const [ctrl, setCtrl]           = useState(DEFAULTS);
+  // Mirrors ctrl synchronously so history commits always read the latest value,
+  // regardless of React's render/batching timing.
+  const ctrlRef = useRef(DEFAULTS);
+  const [historyState, setHistoryState] = useState({
+    stack: [HISTORY_KEYS.reduce((acc, k) => (acc[k] = DEFAULTS[k], acc), {})],
+    index: 0,
+  });
   const [image, setImage]         = useState(null);
   const [isDragging, setDrag]     = useState(false);
   const [exporting, setExp]       = useState(false);
@@ -412,6 +624,16 @@ export default function App() {
   const [licenseLoading, setLicLoading] = useState(false);
   const [licenseSuccess, setLicSuccess] = useState(false);
 
+  // ── Pro features state ───────────────────────────────────────
+  const [savedPresets, setSavedPresets]   = useState([]);
+  const [savePresetName, setSavePresetName] = useState("");
+  const [showSavePreset, setShowSavePreset] = useState(false);
+  const [batchImages, setBatchImages]     = useState([]);
+  const [batchExporting, setBatchExp]     = useState(false);
+  const [batchDone, setBatchDone]         = useState(false);
+  const [showBatch, setShowBatch]         = useState(false);
+  const [showWatermarkEdit, setShowWMEdit] = useState(false);
+
   // ── Close Actions dropdown on outside click ──────────────────
   useEffect(() => {
     const handler = (e) => {
@@ -422,13 +644,15 @@ export default function App() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // ── Load pro status + export count from localStorage ────────
+  // ── Load pro status + export count + saved presets ──────────
   useEffect(() => {
     try {
       const pro = localStorage.getItem(LS_PRO_KEY);
       if (pro) setIsPro(true);
       const count = parseInt(localStorage.getItem(LS_EXPORT_KEY) || "0", 10);
       setExportCount(isNaN(count) ? 0 : count);
+      const presets = JSON.parse(localStorage.getItem(LS_PRESETS_KEY) || "[]");
+      setSavedPresets(Array.isArray(presets) ? presets : []);
     } catch {}
   }, []);
 
@@ -444,7 +668,7 @@ export default function App() {
   const [showPreview, setShowPreview] = useState(false);
   const fileInputId = "mex-file";
 
-  // ── URL hash sync — read on mount ────────────────────────────
+  // ── URL hash sync - read on mount ────────────────────────────
   useEffect(() => {
     const hash = window.location.hash.slice(1);
     if (!hash) return;
@@ -463,7 +687,7 @@ export default function App() {
     } catch {}
   }, []);
 
-  // ── URL hash sync — write only when different from defaults ──
+  // ── URL hash sync - write only when different from defaults ──
   useEffect(() => {
     const m = { rotateX:"rx", rotateY:"ry", rotateZ:"rz", perspective:"pv",
                 layerSep:"sep", bgBlur:"bl", glassBorder:"gb", showFrame:"sf",
@@ -482,29 +706,106 @@ export default function App() {
     if (hasChanges) {
       window.history.replaceState(null, "", "#" + params.toString());
     } else {
-      // Clean URL — remove hash entirely
+      // Clean URL - remove hash entirely
       window.history.replaceState(null, "", window.location.pathname);
     }
   }, [ctrl]);
 
   const set = (key, val) =>
-    setCtrl(p => ({ ...p, [key]: typeof val === "boolean" ? val : Number(val) }));
+    setCtrl(p => {
+      const next = {
+        ...p,
+        [key]: typeof val === "boolean"
+          ? val
+          : NUMERIC_KEYS.has(key)
+            ? Number(val)
+            : val,
+      };
+      ctrlRef.current = next;
+      return next;
+    });
+
+  // ── Undo / Redo history (Camera & Transform + Layer Effects only) ──────
+  const snapshotFromCtrl = (c) =>
+    HISTORY_KEYS.reduce((acc, k) => (acc[k] = c[k], acc), {});
+
+  const commitHistory = () => {
+    const snapshot = snapshotFromCtrl(ctrlRef.current);
+    setHistoryState(prev => {
+      const last = prev.stack[prev.index];
+      if (last && JSON.stringify(last) === JSON.stringify(snapshot)) return prev; // no-op change
+      const trimmed = prev.stack.slice(0, prev.index + 1);
+      const newStack = [...trimmed, snapshot].slice(-MAX_HISTORY);
+      return { stack: newStack, index: newStack.length - 1 };
+    });
+  };
+
+  const undoTransform = () => {
+    setHistoryState(prev => {
+      if (prev.index <= 0) return prev;
+      const newIndex = prev.index - 1;
+      const snapshot = prev.stack[newIndex];
+      setCtrl(p => {
+        const next = { ...p, ...snapshot };
+        ctrlRef.current = next;
+        return next;
+      });
+      return { ...prev, index: newIndex };
+    });
+  };
+
+  const redoTransform = () => {
+    setHistoryState(prev => {
+      if (prev.index >= prev.stack.length - 1) return prev;
+      const newIndex = prev.index + 1;
+      const snapshot = prev.stack[newIndex];
+      setCtrl(p => {
+        const next = { ...p, ...snapshot };
+        ctrlRef.current = next;
+        return next;
+      });
+      return { ...prev, index: newIndex };
+    });
+  };
+
+  const canUndoTransform = historyState.index > 0;
+  const canRedoTransform = historyState.index < historyState.stack.length - 1;
+
+  // Keyboard shortcuts - Cmd/Ctrl+Z to undo, Cmd/Ctrl+Shift+Z to redo.
+  // Skipped while focus is inside a text field so native field undo still works.
+  // Range sliders are <input> elements too but should NOT block the shortcut.
+  const TEXT_INPUT_TYPES = new Set(["text","search","email","number","password","url","tel"]);
+  useEffect(() => {
+    const onKeyDown = (e) => {
+      const el = document.activeElement;
+      const isTextField = el?.tagName === "TEXTAREA" ||
+        (el?.tagName === "INPUT" && TEXT_INPUT_TYPES.has(el.type));
+      if (isTextField) return;
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod || e.key.toLowerCase() !== "z") return;
+      e.preventDefault();
+      if (e.shiftKey) redoTransform(); else undoTransform();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   const showToast = (msg, type = "success") => {
     setToast({ msg, type });
     setTimeout(() => setToast(null), 2800);
   };
 
-  const loadDemo = () => {
-    setImage(DEMO_URL);
+  const loadDemo = (demoId = "dashboard") => {
+    const demo = DEMOS.find(d => d.id === demoId) || DEMOS[0];
+    setImage(demo.url);
     setPanel(false);
-    showToast("Demo loaded — try dragging to rotate!");
+    showToast(`${demo.label} demo loaded - try dragging to rotate!`);
   };
 
   const handleCopyLink = async () => {
     try {
       await navigator.clipboard.writeText(window.location.href);
-      showToast("Link copied — anyone who opens it gets your exact settings ✓");
+      showToast("Link copied - anyone who opens it gets your exact settings ✓");
     } catch { showToast("Could not copy link", "error"); }
   };
 
@@ -517,6 +818,122 @@ export default function App() {
     const next = exportCount + 1;
     setExportCount(next);
     try { localStorage.setItem(LS_EXPORT_KEY, String(next)); } catch {}
+  };
+
+  // ── Saved Presets (Pro) ───────────────────────────────────────
+  const persistPresets = (list) => {
+    setSavedPresets(list);
+    try { localStorage.setItem(LS_PRESETS_KEY, JSON.stringify(list)); } catch {}
+  };
+
+  const handleSavePreset = () => {
+    const name = savePresetName.trim();
+    if (!name) { showToast("Give your preset a name first", "error"); return; }
+    if (savedPresets.length >= 20) {
+      showToast("Limit reached - delete an old preset first", "error");
+      return;
+    }
+    const newPreset = {
+      id: Date.now().toString(36),
+      name,
+      perspective, rotateX, rotateY, rotateZ,
+      layerSep, bgBlur, glassBorder, showFrame,
+      curveScreen, curveIntensity,
+    };
+    persistPresets([...savedPresets, newPreset]);
+    setSavePresetName("");
+    setShowSavePreset(false);
+    showToast(`Preset "${name}" saved ✓`);
+  };
+
+  const handleApplySavedPreset = (preset) => {
+    setCtrl(prev => ({
+      ...prev,
+      perspective: preset.perspective,
+      rotateX: preset.rotateX,
+      rotateY: preset.rotateY,
+      rotateZ: preset.rotateZ,
+      layerSep: preset.layerSep,
+      bgBlur: preset.bgBlur,
+      glassBorder: preset.glassBorder,
+      showFrame: preset.showFrame,
+      curveScreen: preset.curveScreen ?? false,
+      curveIntensity: preset.curveIntensity ?? 40,
+    }));
+    showToast(`Applied "${preset.name}" ✓`);
+  };
+
+  const handleDeleteSavedPreset = (id) => {
+    persistPresets(savedPresets.filter(p => p.id !== id));
+    showToast("Preset deleted");
+  };
+
+  // ── Batch export (Pro) ──────────────────────────────────────
+  const handleBatchFilesSelected = (files) => {
+    const valid = Array.from(files).filter(f => f.type.startsWith("image/"));
+    if (!valid.length) return;
+    if (valid.length > 8) {
+      showToast("Max 8 images per batch", "error");
+      valid.length = 8;
+    }
+    const withUrls = valid.map(f => ({
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2,6),
+      file: f,
+      url: URL.createObjectURL(f),
+      name: f.name,
+    }));
+    setBatchImages(withUrls);
+    setShowBatch(true);
+  };
+
+  const handleRemoveBatchImage = (id) => {
+    setBatchImages(prev => prev.filter(b => b.id !== id));
+  };
+
+  const handleBatchExport = async () => {
+    if (!isPro) { setShowUpgrade(true); return; }
+    if (!batchImages.length || batchExporting) return;
+    setBatchExp(true);
+    setBatchDone(false);
+    try {
+      const JSZip = (await import("jszip")).default;
+      const zip = new JSZip();
+      const scale = exportScale || 2;
+
+      for (const b of batchImages) {
+        // Load image element
+        const imgEl = await new Promise((resolve, reject) => {
+          const im = new Image();
+          im.onload = () => resolve(im);
+          im.onerror = reject;
+          im.src = b.url;
+        });
+        const canvas = await renderExport({
+          imgEl,
+          ctrl,
+          showWatermark: ctrl.showWatermark,
+          scale,
+          customWatermark: ctrl.customWatermark || "",
+        });
+        const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
+        const baseName = b.name.replace(/\.[^.]+$/, "");
+        zip.file(`${baseName}-perspecto.png`, blob);
+      }
+
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const a = document.createElement("a");
+      a.download = "perspecto-batch.zip";
+      a.href = URL.createObjectURL(zipBlob);
+      a.click();
+      setBatchDone(true);
+      showToast(`Exported ${batchImages.length} mockups as ZIP ✓`);
+      setTimeout(() => setBatchDone(false), 3000);
+    } catch (err) {
+      console.error(err);
+      showToast("Batch export failed - try again", "error");
+    } finally {
+      setBatchExp(false);
+    }
   };
 
   // ── Activate license ────────────────────────────────────────
@@ -543,7 +960,7 @@ export default function App() {
           setShowUpgrade(false);
           setLicSuccess(false);
           setLicenseKey("");
-          showToast("🎉 Perspecto Pro activated — enjoy unlimited exports!");
+          showToast("🎉 Perspecto Pro activated - enjoy unlimited exports!");
         }, 1800);
       } else {
         setLicenseError(data.error || "Invalid license key. Check for typos and try again.");
@@ -555,22 +972,32 @@ export default function App() {
     }
   };
 
-  const applyPreset = (pr) =>
-    setCtrl(p => ({ ...p, rotateX:pr.rotateX, rotateY:pr.rotateY,
-                           rotateZ:pr.rotateZ, perspective:pr.perspective }));
+  const applyPreset = (pr) => {
+    setCtrl(p => {
+      const next = { ...p, rotateX:pr.rotateX, rotateY:pr.rotateY,
+                            rotateZ:pr.rotateZ, perspective:pr.perspective };
+      ctrlRef.current = next;
+      return next;
+    });
+    requestAnimationFrame(commitHistory);
+  };
 
   const reset = () => {
     prevCtrl.current = ctrl;
     setCtrl(DEFAULTS);
+    ctrlRef.current = DEFAULTS;
     setCanUndo(true);
     setTimeout(() => setCanUndo(false), 6000);
+    requestAnimationFrame(commitHistory);
   };
 
   const undo = () => {
     if (prevCtrl.current) {
       setCtrl(prevCtrl.current);
+      ctrlRef.current = prevCtrl.current;
       prevCtrl.current = null;
       setCanUndo(false);
+      requestAnimationFrame(commitHistory);
     }
   };
 
@@ -638,17 +1065,19 @@ export default function App() {
     if (!imgRef.current || exporting) return;
     if (!canExportFree) { setShowUpgrade(true); return; }
     setExp(true);
-    const scale = isPro ? PRO_SCALE : FREE_SCALE;
+    // Free users always get 1x. Pro users pick from EXPORT_SCALES (1x/2x/4x).
+    const scale = isPro ? (exportScale || 2) : FREE_SCALE;
     try {
       const canvas = await renderExport({
         imgEl: imgRef.current, ctrl,
         showWatermark: isPro ? ctrl.showWatermark : true,
         scale,
+        customWatermark: isPro ? customWatermark : "",
       });
       pendingCanvas.current = canvas;
       setPreviewUrl(canvas.toDataURL("image/png"));
       setShowPreview(true);
-    } catch(err) { console.error(err); showToast("Render failed — try again", "error"); }
+    } catch(err) { console.error(err); showToast("Render failed - try again", "error"); }
     finally { setExp(false); }
   };
 
@@ -662,7 +1091,7 @@ export default function App() {
     setShowPreview(false);
     setPreviewUrl(null);
     setExpDone(true);
-    const res = isPro ? "2×" : "1×";
+    const res = isPro ? `${exportScale || 2}×` : "1×";
     const newLeft = isPro ? 0 : exportsLeft - 1;
     const leftStr = isPro ? "" : ` · ${newLeft} free export${newLeft===1?"":"s"} remaining`;
     showToast(`PNG saved at ${res} resolution ✓${leftStr}`);
@@ -672,7 +1101,7 @@ export default function App() {
   // ── Copy CSS ────────────────────────────────────────────────
   const handleCopyCSS = async () => {
     const css =
-`/* Generated by Perspecto — perspecto.com */
+`/* Generated by Perspecto - perspecto.io */
 .your-mockup {
   transform: perspective(${perspective}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg);
   transform-style: preserve-3d;${sO > 0 ? `\n  box-shadow: 0 ${sY.toFixed(1)}px ${sB.toFixed(1)}px ${sS.toFixed(1)}px rgba(0,0,0,${sO.toFixed(2)});` : ""}
@@ -689,14 +1118,14 @@ export default function App() {
     if (!isPro) { setShowUpgrade(true); return; }
     if (!imgRef.current || exporting) return;
     try {
-      const canvas = await renderExport({ imgEl: imgRef.current, ctrl, showWatermark: ctrl.showWatermark, scale: PRO_SCALE });
+      const canvas = await renderExport({ imgEl: imgRef.current, ctrl, showWatermark: ctrl.showWatermark, scale: exportScale || 2, customWatermark });
       canvas.toBlob(async (blob) => {
         await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
         setCopiedImg(true);
-        showToast("Image copied — paste into Figma, Notion or Slack ✓");
+        showToast("Image copied - paste into Figma, Notion or Slack ✓");
         setTimeout(() => setCopiedImg(false), 2200);
       }, "image/png");
-    } catch(e) { console.error(e); showToast("Copy failed — browser may not support this", "error"); }
+    } catch(e) { console.error(e); showToast("Copy failed - browser may not support this", "error"); }
   };
 
   // ── Export HTML (Pro only) ───────────────────────────────────
@@ -731,14 +1160,14 @@ export default function App() {
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Perspecto Mockup</title>
   <!--
-    Generated by Perspecto — perspecto.com
+    Generated by Perspecto - perspecto.io
     Settings: perspective=${perspective}px | X=${rotateX}° | Y=${rotateY}° | Z=${rotateZ}° | depth=${sep}px
 
     HOW TO USE IN YOUR PROJECT:
     1. Copy the CSS block below into your stylesheet
     2. Copy the HTML structure into your page
     3. Replace src="data:..." with your own image path
-    The hover transition is built in — customize the :hover values to change the float effect.
+    The hover transition is built in - customize the :hover values to change the float effect.
   -->
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -763,7 +1192,7 @@ export default function App() {
       transition: transform 0.7s cubic-bezier(0.23, 1, 0.32, 1);
     }
 
-    /* Hover: gentle float — customize these values */
+    /* Hover: gentle float - customize these values */
     .perspecto-wrapper:hover {
       transform: perspective(${perspective}px) rotateX(${floatRX}deg) rotateY(${floatRY}deg) rotateZ(${rotateZ}deg);
     }
@@ -840,17 +1269,17 @@ export default function App() {
 
   <div class="perspecto-wrapper">
 
-    <!-- Layer 1: Behind — blurred ambient glow -->
+    <!-- Layer 1: Behind - blurred ambient glow -->
     <div class="perspecto-behind">
       <img src="${base64}" class="perspecto-img" alt="" aria-hidden="true" draggable="false">
     </div>
 
-    <!-- Layer 2: Base — main image -->
+    <!-- Layer 2: Base - main image -->
     <div class="perspecto-base">
       <img src="${base64}" class="perspecto-img" alt="3D mockup" draggable="false">
     </div>
 
-    <!-- Layer 3: Front — glass overlay -->
+    <!-- Layer 3: Front - glass overlay -->
     <div class="perspecto-front">
       <img src="${base64}" class="perspecto-img" alt="" aria-hidden="true" draggable="false">
       <div class="perspecto-glass"></div>
@@ -867,9 +1296,9 @@ export default function App() {
       a.href = URL.createObjectURL(blob);
       a.click();
       setExpHTMLDone(true);
-      showToast("HTML file saved — open it in any browser ✓");
+      showToast("HTML file saved - open it in any browser ✓");
       setTimeout(() => setExpHTMLDone(false), 3000);
-    } catch(e) { console.error(e); showToast("Export failed — try again", "error"); }
+    } catch(e) { console.error(e); showToast("Export failed - try again", "error"); }
     finally { setExpHTML(false); }
   };
 
@@ -880,7 +1309,8 @@ export default function App() {
 
   const { perspective, rotateX, rotateY, rotateZ, shadowIntensity,
           layerSep, bgBlur, glassBorder, showFrame, showWatermark,
-          curveScreen, curveIntensity, exportBg, zoom } = ctrl;
+          curveScreen, curveIntensity, customWatermark,
+          exportBg, exportBgColor, exportScale, zoom } = ctrl;
 
   const sY=shadowIntensity*28, sB=shadowIntensity*90,
         sS=shadowIntensity*24, sO=shadowIntensity*0.72;
@@ -1024,6 +1454,14 @@ export default function App() {
           letter-spacing:.04em;margin-top:2px}
         .btn-demo:hover{border-color:#7070e0;background:#20204a;color:#c0c0ff}
 
+        .btn-demo-pick{display:flex;flex-direction:column;align-items:center;gap:6px;
+          padding:12px 8px;border-radius:10px;border:1px solid #2a2a4e;background:#13132280;
+          color:#8888c0;font-size:10.5px;font-family:'IBM Plex Mono',monospace;
+          cursor:pointer;transition:all .15s;letter-spacing:.02em}
+        .btn-demo-pick:hover{border-color:#5a5ac0;background:#1c1c40;color:#c8c8ff;
+          transform:translateY(-1px)}
+        .btn-demo-pick svg{opacity:.85}
+
         /* stage */
         .stage{position:relative;z-index:2;display:flex;align-items:center;
           justify-content:center;width:100%;height:100%}
@@ -1046,7 +1484,7 @@ export default function App() {
         .dot{color:#44448a}
 
         /* badge */
-        .badge{position:absolute;top:13px;right:14px;z-index:5;display:flex;
+        .badge{position:absolute;bottom:12px;left:14px;z-index:5;display:flex;
           align-items:center;gap:6px;padding:4px 10px;background:rgba(20,20,34,.96);
           border:1px solid #44448a;border-radius:20px;font-family:'IBM Plex Mono',monospace;
           font-size:10px;color:#a0a0c8;letter-spacing:.05em}
@@ -1107,7 +1545,11 @@ export default function App() {
 
         /* ── ACTIONS BUTTON + DROPDOWN ──────────── */
         .actions-wrap{position:absolute;top:12px;right:14px;z-index:25;
-          display:flex;align-items:center;gap:8px;outline:none;border:none;background:none}
+          display:flex;align-items:center;gap:8px;outline:none !important;
+          border:none !important;background:none !important;
+          box-shadow:none !important;-webkit-tap-highlight-color:transparent}
+        .actions-wrap:focus,.actions-wrap:focus-visible,.actions-wrap:focus-within{
+          outline:none !important;box-shadow:none !important;border:none !important}
 
         .actions-btn{display:flex;align-items:center;gap:7px;padding:9px 18px;
           background:rgba(22,22,40,.97);border:1px solid #5858b0;border-radius:20px;
@@ -1329,11 +1771,20 @@ export default function App() {
           50%{box-shadow:0 0 0 6px rgba(99,102,241,0)}}
 
         /* ── COPY LINK BUTTON ───────────────────── */
-        .copy-link-btn{display:flex;align-items:center;gap:5px;padding:4px 10px;
-          background:rgba(20,20,34,.95);border:1px solid #303060;border-radius:20px;
-          font-family:'IBM Plex Mono',monospace;font-size:10px;color:#6060a0;
-          cursor:pointer;transition:all .15s;letter-spacing:.04em}
-        .copy-link-btn:hover{border-color:#6060c0;color:#a0a0e0;background:rgba(30,30,50,.95)}
+        .copy-link-btn{display:flex;align-items:center;gap:6px;padding:9px 16px;
+          background:rgba(20,20,34,.95);border:1px solid #3a3a70;border-radius:20px;
+          font-family:'IBM Plex Mono',monospace;font-size:11px;color:#8888c0;
+          cursor:pointer;transition:all .15s;letter-spacing:.04em;white-space:nowrap}
+        .copy-link-btn:hover{border-color:#6868d0;color:#b0b0f0;background:rgba(30,30,50,.95)}
+
+        /* ── UNDO/REDO BUTTONS ───────────────────── */
+        .undo-redo-btn{display:flex;align-items:center;justify-content:center;
+          width:38px;padding:9px 0;background:rgba(20,20,34,.95);
+          border:1px solid #3a3a70;border-radius:10px;color:#8888c0;
+          cursor:pointer;transition:all .15s}
+        .undo-redo-btn:hover:not(:disabled){border-color:#6868d0;color:#c0c0f0;
+          background:rgba(30,30,50,.95)}
+        .undo-redo-btn:disabled{opacity:.3;cursor:not-allowed}
 
         /* frame chrome overlay (CSS preview only) */
         .frame-bar{position:absolute;top:0;left:0;right:0;background:#1c1c1e;
@@ -1357,7 +1808,7 @@ export default function App() {
         @media(max-width:480px){
           .panel{width:100vw;min-width:unset}
           .statbar{display:none}
-          .badge{top:9px;right:9px}
+          .badge{bottom:9px;left:9px}
         }
       `}</style>
 
@@ -1420,19 +1871,21 @@ export default function App() {
                 <div className="upg-compare">
                   <div className="upg-col free">
                     <div className="upg-col-hd">Free</div>
-                    <div className="upg-row f">3 exports total</div>
+                    <div className="upg-row f">5 exports total</div>
                     <div className="upg-row f">1× resolution</div>
                     <div className="upg-row f">Watermark locked on</div>
                     <div className="upg-row f">PNG only</div>
-                    <div className="upg-row f">No clipboard copy</div>
+                    <div className="upg-row f">No saved presets</div>
                   </div>
                   <div className="upg-col pro">
                     <div className="upg-col-hd"><Sparkles size={9}/> Pro</div>
                     <div className="upg-row p">Unlimited exports</div>
-                    <div className="upg-row p">2× retina quality</div>
-                    <div className="upg-row p">Remove watermark</div>
-                    <div className="upg-row p">Export HTML file</div>
-                    <div className="upg-row p">Copy image to clipboard</div>
+                    <div className="upg-row p">Up to 4× resolution</div>
+                    <div className="upg-row p">Custom watermark</div>
+                    <div className="upg-row p">Batch export (ZIP)</div>
+                    <div className="upg-row p">Save unlimited presets</div>
+                    <div className="upg-row p">Solid &amp; gradient backgrounds</div>
+                    <div className="upg-row p">Export HTML + copy image</div>
                     <div className="upg-row p">Lifetime updates</div>
                   </div>
                 </div>
@@ -1441,7 +1894,7 @@ export default function App() {
                   <div className="upg-price-note">one-time · no subscription · yours forever</div>
                 </div>
                 <a className="upg-cta" href={POLAR_CHECKOUT_URL} target="_blank" rel="noopener noreferrer">
-                  <Sparkles size={14}/> Get Perspecto Pro — $19
+                  <Sparkles size={14}/> Get Perspecto Pro - $19
                 </a>
                 <div className="upg-divider">already purchased?</div>
                 <button className="upg-act-btn" onClick={() => setShowActivate(true)}>
@@ -1515,7 +1968,7 @@ export default function App() {
               </div>
               <div style={{display:"flex",flexDirection:"column",gap:6}}>
                 <a className="btn-share"
-                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent("Just made this 3D UI mockup with Perspecto — free tool, no sign-up 🚀 ")}&url=${encodeURIComponent(typeof window!=="undefined"?window.location.href:"")}`}
+                  href={`https://twitter.com/intent/tweet?text=${encodeURIComponent("Just made this 3D UI mockup with Perspecto - free tool, no sign-up 🚀 ")}&url=${encodeURIComponent(typeof window!=="undefined"?window.location.href:"")}`}
                   target="_blank" rel="noopener noreferrer" onClick={() => setModal(false)}>
                   <Share2 size={13}/> Share on X / Twitter
                 </a>
@@ -1534,7 +1987,7 @@ export default function App() {
         <aside className={`panel${panelOpen?" open":""}`}>
           <div className="ph">
             <div style={{display:"flex",alignItems:"center",gap:14,flex:1}}>
-              {/* Logo — place your logo as /public/logo.png to replace this */}
+              {/* Logo - place your logo as /public/logo.png to replace this */}
               <LogoMark/>
               <div>
                 <div className="eyebrow">Perspecto</div>
@@ -1549,7 +2002,7 @@ export default function App() {
           </div>
           {/* Tagline below header */}
           <div style={{padding:"8px 16px 14px",borderBottom:"1px solid #32324a"}}>
-            <div className="ptagline">Turn any screenshot into a stunning 3D marketing visual in seconds.</div>
+            <div className="ptagline">Turn any image or design into a 3D mockup in seconds.</div>
           </div>
 
           <div className="ca">
@@ -1571,12 +2024,117 @@ export default function App() {
               </div>
             </div>
 
+            {/* ── My Presets (Pro) ── */}
+            <div className="sec">
+              <div className="slbl">
+                <Bookmark size={9} style={{opacity:.4,flexShrink:0}}/>My Presets
+                {!isPro && <span className="dd-pro-pill" style={{marginLeft:"auto"}}>PRO</span>}
+              </div>
+              {isPro ? (
+                <>
+                  <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>Save your exact settings for reuse across projects.</div>
+
+                  {savedPresets.length > 0 && (
+                    <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                      {savedPresets.map(p => (
+                        <div key={p.id} style={{display:"flex",alignItems:"center",gap:6}}>
+                          <button
+                            onClick={() => handleApplySavedPreset(p)}
+                            style={{
+                              flex:1, textAlign:"left", padding:"7px 10px",
+                              background:"#1a1a30", border:"1px solid #32324a",
+                              borderRadius:6, color:"#c0c0e8", fontSize:11,
+                              cursor:"pointer", transition:"all .15s",
+                              fontFamily:"'IBM Plex Sans',sans-serif",
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor="#5050a0"; e.currentTarget.style.background="#22223e"; }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor="#32324a"; e.currentTarget.style.background="#1a1a30"; }}>
+                            {p.name}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteSavedPreset(p.id)}
+                            title="Delete preset"
+                            style={{
+                              flexShrink:0, padding:6, background:"transparent",
+                              border:"1px solid #32324a", borderRadius:6,
+                              color:"#705050", cursor:"pointer", transition:"all .15s",
+                              display:"flex", alignItems:"center", justifyContent:"center",
+                            }}
+                            onMouseEnter={e => { e.currentTarget.style.borderColor="#a04040"; e.currentTarget.style.color="#f08080"; }}
+                            onMouseLeave={e => { e.currentTarget.style.borderColor="#32324a"; e.currentTarget.style.color="#705050"; }}>
+                            <Trash2 size={11}/>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {showSavePreset ? (
+                    <div style={{display:"flex",gap:6}}>
+                      <input
+                        autoFocus
+                        value={savePresetName}
+                        onChange={e => setSavePresetName(e.target.value)}
+                        onKeyDown={e => e.key === "Enter" && handleSavePreset()}
+                        placeholder="e.g. My Hero Angle"
+                        maxLength={30}
+                        style={{
+                          flex:1, padding:"7px 10px", background:"#0f0f1c",
+                          border:"1px solid #3a3a70", borderRadius:6,
+                          color:"#e0e0ff", fontSize:11, outline:"none",
+                          fontFamily:"'IBM Plex Sans',sans-serif",
+                        }}
+                      />
+                      <button onClick={handleSavePreset}
+                        style={{
+                          padding:"7px 12px", background:"#1e3a24", border:"1px solid #2a7038",
+                          borderRadius:6, color:"#80e090", fontSize:11, cursor:"pointer",
+                          fontFamily:"'IBM Plex Sans',sans-serif", fontWeight:500,
+                        }}>Save</button>
+                      <button onClick={() => { setShowSavePreset(false); setSavePresetName(""); }}
+                        style={{
+                          padding:"7px 10px", background:"transparent", border:"1px solid #32324a",
+                          borderRadius:6, color:"#7070a0", fontSize:11, cursor:"pointer",
+                        }}><X size={11}/></button>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => setShowSavePreset(true)}
+                      disabled={!image}
+                      style={{
+                        display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                        width:"100%", padding:"8px 12px", background:"transparent",
+                        border:"1px dashed #40408a", borderRadius:6, color:"#8080c0",
+                        fontSize:11, cursor: image ? "pointer" : "not-allowed",
+                        opacity: image ? 1 : 0.4,
+                        fontFamily:"'IBM Plex Sans',sans-serif", transition:"all .15s",
+                      }}
+                      onMouseEnter={e => { if(image){ e.currentTarget.style.borderColor="#6060c0"; e.currentTarget.style.color="#a0a0f0"; }}}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor="#40408a"; e.currentTarget.style.color="#8080c0"; }}>
+                      <BookmarkPlus size={12}/> Save current settings
+                    </button>
+                  )}
+                </>
+              ) : (
+                <button
+                  onClick={() => setShowUpgrade(true)}
+                  style={{
+                    display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                    width:"100%", padding:"9px 12px", background:"#14142a",
+                    border:"1px dashed #303060", borderRadius:6, color:"#606090",
+                    fontSize:11, cursor:"pointer", fontFamily:"'IBM Plex Sans',sans-serif",
+                  }}>
+                  <Lock size={11}/> Save and reuse your favorite angles
+                </button>
+              )}
+            </div>
+
             {/* ── Transform ── */}
             <div className="sec">
               <div className="slbl"><Sliders size={9} style={{opacity:.4,flexShrink:0}}/>Camera &amp; Transform</div>
               <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>Rotate and tilt your image in 3D space. Drag the canvas too.</div>
               {T_SLIDERS.map(cfg => (
-                <SliderW key={cfg.key} cfg={cfg} val={ctrl[cfg.key]} onChange={v => set(cfg.key, v)}/>
+                <SliderW key={cfg.key} cfg={cfg} val={ctrl[cfg.key]} onChange={v => set(cfg.key, v)} onCommit={commitHistory}/>
               ))}
             </div>
 
@@ -1585,28 +2143,39 @@ export default function App() {
               <div className="slbl"><Layers size={9} style={{opacity:.4,flexShrink:0}}/>Layer Effects</div>
               <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>Separate the image into floating depth layers for a 3D feel.</div>
               {L_SLIDERS.map(cfg => (
-                <SliderW key={cfg.key} cfg={cfg} val={ctrl[cfg.key]} onChange={v => set(cfg.key, v)}/>
+                <SliderW key={cfg.key} cfg={cfg} val={ctrl[cfg.key]} onChange={v => set(cfg.key, v)} onCommit={commitHistory}/>
               ))}
               <Toggle icon={<Eye size={12} style={{color:glassBorder?"#818cf8":"#7070a0"}}/>}
-                label="Glass Edge Glow" val={glassBorder} onToggle={() => set("glassBorder",!glassBorder)}/>
+                label="Glass Edge Glow" val={glassBorder} onToggle={() => { set("glassBorder",!glassBorder); requestAnimationFrame(commitHistory); }}/>
               <Toggle icon={<Monitor size={12} style={{color:showFrame?"#818cf8":"#7070a0"}}/>}
-                label="Browser Chrome Frame" val={showFrame} onToggle={() => set("showFrame",!showFrame)}/>
+                label="Browser Chrome Frame" val={showFrame} onToggle={() => { set("showFrame",!showFrame); requestAnimationFrame(commitHistory); }}/>
               <Toggle
                 icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke={curveScreen?"#818cf8":"#7070a0"} strokeWidth="1.5" strokeLinecap="round"><path d="M1 6 Q3 2 6 2 Q9 2 11 6"/><path d="M1 6 Q3 10 6 10 Q9 10 11 6"/></svg>}
-                label="Curved Screen Effect" val={curveScreen} onToggle={() => set("curveScreen",!curveScreen)}/>
+                label="Curved Screen Effect" val={curveScreen} onToggle={() => { set("curveScreen",!curveScreen); requestAnimationFrame(commitHistory); }}/>
               {curveScreen && (
-                <SliderW
-                  cfg={{ key:"curveIntensity", label:"Curve Amount", min:10, max:100, step:1, unit:"%", dec:0 }}
-                  val={curveIntensity}
-                  onChange={v => set("curveIntensity", v)}
-                />
+                <div style={{display:"flex",alignItems:"flex-end",gap:8}}>
+                  <div style={{flex:1}}>
+                    <SliderW
+                      cfg={{ key:"curveIntensity", label:"Curve Amount", min:10, max:100, step:1, unit:"%", dec:0 }}
+                      val={curveIntensity}
+                      onChange={v => set("curveIntensity", v)}
+                      onCommit={commitHistory}
+                    />
+                  </div>
+                  <CurveResetBtn
+                    current={curveIntensity}
+                    onReset={(v) => { set("curveIntensity", v ?? 40); requestAnimationFrame(commitHistory); }}
+                  />
+                </div>
               )}
             </div>
 
             {/* ── Export ── */}
             <div className="sec">
               <div className="slbl"><Download size={9} style={{opacity:.4,flexShrink:0}}/>Export</div>
-              <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>Save your mockup. PNG exports at {isPro ? "2×" : "1×"} resolution{isPro ? "" : " — upgrade for 2× retina"}.</div>
+              <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>Save your mockup in the resolution and background you need.</div>
+
+              {/* Background presets */}
               <div>
                 <div className="sm" style={{marginBottom:8}}>
                   <span className="sl">Export Background</span>
@@ -1617,20 +2186,174 @@ export default function App() {
                       onClick={() => set("exportBg", bg)}>{bg}</button>
                   ))}
                 </div>
+                {isPro ? (
+                  <div className="bg-pills" style={{marginTop:6}}>
+                    <button className={`bgp${exportBg==="color"?" sel":""}`}
+                      onClick={() => set("exportBg", "color")}>solid</button>
+                    <button className={`bgp${exportBg==="gradient"?" sel":""}`}
+                      onClick={() => set("exportBg", "gradient")}>gradient</button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowUpgrade(true)}
+                    style={{
+                      display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                      width:"100%", marginTop:6, padding:"7px 10px", background:"#14142a",
+                      border:"1px dashed #303060", borderRadius:6, color:"#606090",
+                      fontSize:10, cursor:"pointer", fontFamily:"'IBM Plex Mono',monospace",
+                      letterSpacing:".03em",
+                    }}>
+                    <Lock size={10}/> Solid &amp; gradient brand colors (Pro)
+                  </button>
+                )}
+                {isPro && (exportBg === "color" || exportBg === "gradient") && (
+                  <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8}}>
+                    <input
+                      type="color"
+                      value={exportBgColor}
+                      onChange={e => set("exportBgColor", e.target.value)}
+                      style={{
+                        width:34, height:30, padding:0, border:"1px solid #32324a",
+                        borderRadius:6, background:"none", cursor:"pointer",
+                      }}
+                    />
+                    <span style={{fontSize:10,color:"#8080b0",fontFamily:"'IBM Plex Mono',monospace"}}>
+                      {exportBgColor}
+                    </span>
+                  </div>
+                )}
               </div>
+
+              {/* Resolution picker */}
+              <div>
+                <div className="sm" style={{marginBottom:8}}>
+                  <span className="sl">Export Resolution</span>
+                </div>
+                <div className="bg-pills">
+                  {EXPORT_SCALES.map(s => {
+                    const locked = s.pro && !isPro;
+                    return (
+                      <button key={s.value}
+                        className={`bgp${exportScale===s.value && !locked ?" sel":""}`}
+                        onClick={() => locked ? setShowUpgrade(true) : set("exportScale", s.value)}
+                        style={locked ? {opacity:.5} : undefined}>
+                        {locked && <Lock size={9} style={{marginRight:4,verticalAlign:"-1px"}}/>}
+                        {s.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Watermark toggle + custom text */}
               {isPro ? (
-                <Toggle icon={<Droplets size={12} style={{color:showWatermark?"#818cf8":"#7070a0"}}/>}
-                  label="Include Watermark" val={showWatermark} onToggle={toggleWatermark}/>
+                <>
+                  <Toggle icon={<Droplets size={12} style={{color:showWatermark?"#818cf8":"#7070a0"}}/>}
+                    label="Include Watermark" val={showWatermark} onToggle={toggleWatermark}/>
+                  {showWatermark && (
+                    <div>
+                      <div className="sm" style={{marginBottom:6}}>
+                        <span className="sl" style={{fontSize:10}}>Custom Watermark Text</span>
+                      </div>
+                      <input
+                        value={customWatermark}
+                        onChange={e => set("customWatermark", e.target.value)}
+                        placeholder="via Perspecto"
+                        maxLength={28}
+                        style={{
+                          width:"100%", padding:"7px 10px", background:"#0f0f1c",
+                          border:"1px solid #32324a", borderRadius:6,
+                          color:"#e0e0ff", fontSize:11, outline:"none",
+                          fontFamily:"'IBM Plex Mono',monospace",
+                        }}
+                      />
+                    </div>
+                  )}
+                </>
               ) : (
                 <div className="trow" onClick={() => setShowUpgrade(true)} style={{cursor:"pointer"}}>
                   <div className="tleft">
                     <Droplets size={12} style={{color:"#404068"}}/>
-                    <span className="tlbl" style={{color:"#505070"}}>Remove Watermark</span>
+                    <span className="tlbl" style={{color:"#505070"}}>Remove or customize watermark</span>
                   </div>
                   <span style={{fontSize:9,fontFamily:"'IBM Plex Mono',monospace",
                     color:"#5050a0",letterSpacing:".08em",background:"#1a1a38",
                     padding:"2px 6px",borderRadius:4,border:"1px solid #2a2a60"}}>PRO</span>
                 </div>
+              )}
+            </div>
+
+            {/* ── Batch Export (Pro) ── */}
+            <div className="sec">
+              <div className="slbl">
+                <Package size={9} style={{opacity:.4,flexShrink:0}}/>Batch Export
+                {!isPro && <span className="dd-pro-pill" style={{marginLeft:"auto"}}>PRO</span>}
+              </div>
+              <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>
+                Apply your current settings to multiple images at once.
+              </div>
+              {isPro ? (
+                <>
+                  <label
+                    htmlFor="batch-file-input"
+                    style={{
+                      display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                      width:"100%", padding:"9px 12px", background:"transparent",
+                      border:"1px dashed #40408a", borderRadius:6, color:"#8080c0",
+                      fontSize:11, cursor:"pointer", fontFamily:"'IBM Plex Sans',sans-serif",
+                    }}>
+                    <Upload size={12}/> Select 2-8 images
+                  </label>
+                  <input id="batch-file-input" type="file" accept="image/*" multiple
+                    style={{display:"none"}}
+                    onChange={e => { handleBatchFilesSelected(e.target.files); e.target.value=""; }}/>
+
+                  {batchImages.length > 0 && (
+                    <div style={{display:"flex",flexDirection:"column",gap:6}}>
+                      <div style={{fontSize:10,color:"#8080b0",fontFamily:"'IBM Plex Mono',monospace"}}>
+                        {batchImages.length} image{batchImages.length===1?"":"s"} queued
+                      </div>
+                      {batchImages.map(b => (
+                        <div key={b.id} style={{display:"flex",alignItems:"center",gap:8,
+                          padding:"5px 8px",background:"#14142a",borderRadius:6,
+                          border:"1px solid #2a2a48"}}>
+                          <img src={b.url} alt="" style={{width:24,height:24,objectFit:"cover",
+                            borderRadius:4,flexShrink:0}}/>
+                          <span style={{flex:1,fontSize:10,color:"#a0a0c8",
+                            overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>
+                            {b.name}
+                          </span>
+                          <button onClick={() => handleRemoveBatchImage(b.id)}
+                            style={{flexShrink:0,background:"transparent",border:"none",
+                              color:"#706090",cursor:"pointer",padding:2}}>
+                            <X size={11}/>
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        className={`btn btn-export${batchDone?" done":""}`}
+                        onClick={handleBatchExport}
+                        disabled={batchExporting}>
+                        {batchExporting
+                          ? <><Loader size={13} className="spin"/>Exporting {batchImages.length}...</>
+                          : batchDone
+                            ? <><Download size={13}/>ZIP Saved!</>
+                            : <><Download size={13}/>Export All as ZIP</>}
+                      </button>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <button
+                  onClick={() => setShowUpgrade(true)}
+                  style={{
+                    display:"flex", alignItems:"center", justifyContent:"center", gap:6,
+                    width:"100%", padding:"9px 12px", background:"#14142a",
+                    border:"1px dashed #303060", borderRadius:6, color:"#606090",
+                    fontSize:11, cursor:"pointer", fontFamily:"'IBM Plex Sans',sans-serif",
+                  }}>
+                  <Lock size={11}/> Export multiple images at once
+                </button>
               )}
             </div>
 
@@ -1640,13 +2363,13 @@ export default function App() {
               <div style={{fontSize:10,color:"#8080b8",fontFamily:"'IBM Plex Mono',monospace",lineHeight:1.5,marginBottom:2}}>Copy-paste ready snippets for your project or design tool.</div>
               <div className="btn-row">
                 <button className="btn" onClick={handleCopyCSS} disabled={!image}
-                  title="Copy the CSS transform — free">
+                  title="Copy the CSS transform - free">
                   <Copy size={12}/>{copiedCSS ? "Copied!" : "Copy CSS"}
                 </button>
                 <button
                   className={`btn${!isPro ? " btn-locked" : copiedImg ? " btn-copied" : ""}`}
                   onClick={handleCopyImage} disabled={!image}
-                  title={isPro ? "Copy PNG to clipboard" : "Pro feature — upgrade to unlock"}>
+                  title={isPro ? "Copy PNG to clipboard" : "Pro feature - upgrade to unlock"}>
                   {!isPro ? <Lock size={12} className="lock-icon"/> : <ClipboardCopy size={12}/>}
                   {copiedImg ? "Copied!" : "Copy Image"}
                   {!isPro && <span style={{fontSize:8,fontFamily:"'IBM Plex Mono',monospace",
@@ -1656,8 +2379,8 @@ export default function App() {
               </div>
               <div style={{fontSize:10,color:"#404060",fontFamily:"'IBM Plex Mono',monospace",
                 lineHeight:1.5,letterSpacing:".02em"}}>
-                <span style={{color:"#7070a0"}}>Copy CSS</span> — paste into any stylesheet (free)<br/>
-                <span style={{color:isPro?"#7070a0":"#404060"}}>Copy Image</span> — paste into Figma, Notion, Slack {!isPro && <span style={{color:"#4040a0"}}>(Pro)</span>}
+                <span style={{color:"#7070a0"}}>Copy CSS</span> - paste into any stylesheet (free)<br/>
+                <span style={{color:isPro?"#7070a0":"#404060"}}>Copy Image</span> - paste into Figma, Notion, Slack {!isPro && <span style={{color:"#4040a0"}}>(Pro)</span>}
               </div>
             </div>
 
@@ -1665,19 +2388,19 @@ export default function App() {
 
           {/* ── Footer ── */}
           <div className="pf">
-            {/* File input hidden — accessible via Actions dropdown and canvas drop zone */}
+            {/* File input hidden - accessible via Actions dropdown and canvas drop zone */}
             <input id={fileInputId} type="file" accept="image/*"
               onChange={e => loadFile(e.target.files[0])} style={{display:"none"}}/>
             {!isPro && (
               <button className="btn btn-upgrade-pro" onClick={() => setShowUpgrade(true)}>
-                <Sparkles size={13}/> Upgrade to Pro — $19
+                <Sparkles size={13}/> Upgrade to Pro - $19
               </button>
             )}
             {isPro && (
               <div style={{textAlign:"center",fontFamily:"'IBM Plex Mono',monospace",
                 fontSize:10,color:"#6060a0",letterSpacing:".04em",padding:"4px 0"}}>
                 <Sparkles size={10} style={{display:"inline",marginRight:5,color:"#8080c0"}}/> 
-                Pro active — unlimited exports
+                Pro active - unlimited exports
               </div>
             )}
           </div>
@@ -1698,7 +2421,23 @@ export default function App() {
           <div className="vig"/>
 
           {/* ══ ACTIONS BUTTON + DROPDOWN ══════════════════════ */}
-          <div className="actions-wrap" ref={actionsRef}>
+          <div className="actions-wrap" ref={actionsRef}
+            tabIndex={-1}
+            style={{outline:"none",border:"none",background:"none",boxShadow:"none"}}>
+            {image && (
+              <div style={{display:"flex",gap:4}}>
+                <button className="undo-redo-btn" onClick={undoTransform}
+                  disabled={!canUndoTransform}
+                  title="Undo (Cmd/Ctrl+Z)">
+                  <Undo2 size={13}/>
+                </button>
+                <button className="undo-redo-btn" onClick={redoTransform}
+                  disabled={!canRedoTransform}
+                  title="Redo (Cmd/Ctrl+Shift+Z)">
+                  <Redo2 size={13}/>
+                </button>
+              </div>
+            )}
             {image && (
               <button className="copy-link-btn" onClick={handleCopyLink}
                 title="Copy shareable link with your exact settings">
@@ -1718,7 +2457,7 @@ export default function App() {
                   onClick={() => { setShowActions(false); handleExport(); }}
                   disabled={!image||exporting}>
                   {exporting ? <Loader size={13} className="dd-spin"/> : <Download size={13}/>}
-                  <span className="dd-item-label">Export PNG {isPro?"(2×)":"(1×)"}</span>
+                  <span className="dd-item-label">Export PNG {isPro?`(${exportScale||2}×)`:"(1×)"}</span>
                   {!isPro && exportsLeft > 0 && (
                     <span style={{fontSize:9,color:"#60a870",fontFamily:"'IBM Plex Mono',monospace"}}>{exportsLeft} left</span>
                   )}
@@ -1729,6 +2468,14 @@ export default function App() {
                   disabled={!image||exportingHTML}>
                   {exportingHTML ? <Loader size={13} className="dd-spin"/> : !isPro ? <Lock size={13}/> : <Code2 size={13}/>}
                   <span className="dd-item-label">{exportHTMLDone?"HTML Saved!":"Export HTML"}</span>
+                  {!isPro && <span className="dd-pro-pill">PRO</span>}
+                </button>
+                <button
+                  className={`dd-item${!isPro?" locked":""}`}
+                  onClick={() => { setShowActions(false); if(!isPro){ setShowUpgrade(true); } else { document.getElementById("batch-file-input")?.click(); } }}
+                  disabled={!image}>
+                  {!isPro ? <Lock size={13}/> : <Package size={13}/>}
+                  <span className="dd-item-label">Batch Export</span>
                   {!isPro && <span className="dd-pro-pill">PRO</span>}
                 </button>
 
@@ -1777,7 +2524,7 @@ export default function App() {
             )}
           </div>
 
-          {/* Remove pill — always visible when image loaded */}
+          {/* Remove pill - always visible when image loaded */}
           {image && (
             <button className="remove-img-btn" onClick={() => setImage(null)}
               style={{opacity:1}} title="Remove image">
@@ -1792,7 +2539,7 @@ export default function App() {
                 style={{width:"100%"}}>
                 <ImageIcon size={36} strokeWidth={1} className="di"/>
                 <div className="dp">
-                  Drop a screenshot to begin
+                  Drop an image to begin
                   <div className="dp-sub">or click to browse your files</div>
                 </div>
                 <div className="dh">Ctrl+V to paste from clipboard</div>
@@ -1800,10 +2547,23 @@ export default function App() {
                   {["PNG","JPG","WebP","SVG"].map(f => <span key={f} className="fpill">{f}</span>)}
                 </div>
               </label>
-              <button className="btn-demo" onClick={e => { e.preventDefault(); loadDemo(); }}
-                style={{width:"100%",justifyContent:"center",padding:"12px 20px",fontSize:12}}>
-                <ZoomIn size={13}/> Try with demo screenshot
-              </button>
+
+              <div style={{width:"100%",textAlign:"center"}}>
+                <div style={{fontSize:10,color:"#6868a0",fontFamily:"'IBM Plex Mono',monospace",
+                  letterSpacing:".05em",marginBottom:8}}>
+                  OR TRY A DEMO
+                </div>
+                <div style={{display:"flex",gap:8,width:"100%"}}>
+                  {DEMO_PICKS.map(d => (
+                    <button key={d.id} className="btn-demo-pick"
+                      onClick={e => { e.preventDefault(); loadDemo(d.id); }}
+                      style={{flex:1}}>
+                      <d.icon size={15}/>
+                      <span>{d.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
             </div>
           ) : (
             <div
@@ -1825,127 +2585,6 @@ export default function App() {
                 />
               </div>
             </div>
-          )}
-
-          {/* ══ ACTIONS BUTTON + DROPDOWN ══════════════════════ */}
-          <div className="actions-wrap" ref={actionsRef}>
-            {/* Share settings pill */}
-            {image && (
-              <button className="copy-link-btn" onClick={handleCopyLink}
-                title="Copy shareable link with your exact settings">
-                <Link2 size={9}/> Share settings
-              </button>
-            )}
-
-            {/* Actions button */}
-            <button
-              className={`actions-btn${showActions?" open":""}`}
-              onClick={() => setShowActions(v => !v)}>
-              <Zap size={11}/> Actions <ChevronDown size={10} style={{transition:"transform .2s",transform:showActions?"rotate(180deg)":"rotate(0deg)"}}/>
-            </button>
-
-            {/* Dropdown */}
-            {showActions && (
-              <div className="actions-dd">
-
-                {/* ── Export ── */}
-                <div className="dd-section">Export</div>
-
-                <button
-                  className="dd-item green"
-                  onClick={() => { setShowActions(false); handleExport(); }}
-                  disabled={!image||exporting}>
-                  {exporting ? <Loader size={13} className="dd-spin"/> : <Download size={13}/>}
-                  <span className="dd-item-label">
-                    Export PNG {isPro ? "(2×)" : "(1×)"}
-                  </span>
-                  {!isPro && exportsLeft > 0 && (
-                    <span style={{fontSize:9,color:"#60a070",fontFamily:"'IBM Plex Mono',monospace"}}>
-                      {exportsLeft} left
-                    </span>
-                  )}
-                </button>
-
-                <button
-                  className={`dd-item${!isPro?" locked":exportHTMLDone?" blue":""}`}
-                  onClick={() => { setShowActions(false); handleExportHTML(); }}
-                  disabled={!image||exportingHTML}>
-                  {exportingHTML
-                    ? <Loader size={13} className="dd-spin"/>
-                    : !isPro ? <Lock size={13}/>
-                    : <Code2 size={13}/>}
-                  <span className="dd-item-label">
-                    {exportHTMLDone ? "HTML Saved!" : "Export HTML"}
-                  </span>
-                  {!isPro && <span className="dd-pro-pill">PRO</span>}
-                </button>
-
-                <div className="dd-divider"/>
-
-                {/* ── Tools ── */}
-                <div className="dd-section">Tools</div>
-
-                <button
-                  className="dd-item"
-                  onClick={() => { setShowActions(false); handleCopyCSS(); }}
-                  disabled={!image}>
-                  <Copy size={13}/>
-                  <span className="dd-item-label">{copiedCSS ? "CSS Copied!" : "Copy CSS"}</span>
-                  <span style={{fontSize:9,color:"#606090",fontFamily:"'IBM Plex Mono',monospace",marginLeft:"auto"}}>free</span>
-                </button>
-
-                <button
-                  className={`dd-item${!isPro?" locked":""}`}
-                  onClick={() => { setShowActions(false); handleCopyImage(); }}
-                  disabled={!image}>
-                  {!isPro ? <Lock size={13}/> : <ClipboardCopy size={13}/>}
-                  <span className="dd-item-label">{copiedImg ? "Image Copied!" : "Copy Image"}</span>
-                  {!isPro && <span className="dd-pro-pill">PRO</span>}
-                </button>
-
-                <div className="dd-divider"/>
-
-                {/* ── Manage ── */}
-                <div className="dd-section">Manage</div>
-
-                <label className="dd-item blue" htmlFor={fileInputId} style={{cursor:"pointer"}}>
-                  <Upload size={13}/>
-                  <span className="dd-item-label">{image ? "Replace Image" : "Upload Image"}</span>
-                </label>
-
-                {canUndo ? (
-                  <button className="dd-item amber"
-                    onClick={() => { setShowActions(false); undo(); }}>
-                    <Undo2 size={13}/>
-                    <span className="dd-item-label">Undo Reset</span>
-                  </button>
-                ) : (
-                  <button className="dd-item"
-                    onClick={() => { setShowActions(false); reset(); }}>
-                    <RotateCcw size={13}/>
-                    <span className="dd-item-label">Reset Defaults</span>
-                  </button>
-                )}
-
-                {image && (
-                  <button className="dd-item danger"
-                    onClick={() => { setShowActions(false); setImage(null); }}>
-                    <X size={13}/>
-                    <span className="dd-item-label">Remove Image</span>
-                  </button>
-                )}
-
-              </div>
-            )}
-          </div>
-
-          {/* Remove image — visible when image loaded */}
-          {image && (
-            <button className="remove-img-btn" onClick={() => setImage(null)}
-              style={{opacity:1}}
-              title="Remove image — return to drop zone">
-              <X size={9}/> Remove
-            </button>
           )}
 
           {image && <>
@@ -2008,7 +2647,7 @@ function LogoMark() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// LAYER STACK — CSS 3D live preview
+// LAYER STACK - CSS 3D live preview
 // ─────────────────────────────────────────────────────────────
 
 function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
@@ -2070,7 +2709,7 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
       inset:0,
       borderRadius: curveRadius,
       pointerEvents:"none",
-      // Edge darkening — simulates the screen curving away from viewer
+      // Edge darkening - simulates the screen curving away from viewer
       background:`radial-gradient(
         ellipse 110% 100% at 50% 50%,
         transparent 30%,
@@ -2079,7 +2718,7 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
       )`,
       zIndex:2,
     }}>
-      {/* Center highlight strip — light reflecting off the curve apex */}
+      {/* Center highlight strip - light reflecting off the curve apex */}
       <div style={{
         position:"absolute",
         top:"8%", bottom:"8%",
@@ -2103,7 +2742,7 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
   return (
     <div style={wrap}>
 
-      {/* Layer 0 — Behind: blurred ambient glow */}
+      {/* Layer 0 - Behind: blurred ambient glow */}
       <div style={{position:"absolute",inset:0,
         transform:`translateZ(${-layerSep}px)`,backfaceVisibility:"hidden",
         display:"flex",alignItems:"center",justifyContent:"center",pointerEvents:"none"}}>
@@ -2114,7 +2753,7 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
         }}/>
       </div>
 
-      {/* Layer 1 — Base image */}
+      {/* Layer 1 - Base image */}
       <div style={{position:"relative",transform:`translateZ(0px) scaleX(${curveScaleX})`,
         backfaceVisibility:"hidden",display:"flex",alignItems:"center",
         justifyContent:"center",
@@ -2137,12 +2776,12 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
         <div style={{position:"relative",display:"inline-flex"}}>
           <img ref={(el) => { baseImgRef.current=el; if(imgRef) imgRef.current=el; }}
             src={image} alt="3D base layer" draggable={false} style={imgStyle}/>
-          {/* Curve overlay — edge darkening + center highlight */}
+          {/* Curve overlay - edge darkening + center highlight */}
           {CurveOverlay}
         </div>
       </div>
 
-      {/* Layer 2 — Foreground glass pane */}
+      {/* Layer 2 - Foreground glass pane */}
       {layerSep > 0 && (
         <div style={{position:"absolute",inset:0,
           transform:`translateZ(${layerSep}px)`,backfaceVisibility:"hidden",
@@ -2180,9 +2819,52 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
 }
 
 // ─────────────────────────────────────────────────────────────
+// CURVE RESET BUTTON - resets intensity with undo support
+// ─────────────────────────────────────────────────────────────
+function CurveResetBtn({ current, onReset }) {
+  const [prev, setPrev] = useState(null);
+  const [done, setDone] = useState(false);
+
+  const handleClick = () => {
+    if (done && prev !== null) {
+      // Undo - restore previous value
+      onReset(prev);
+      setPrev(null);
+      setDone(false);
+    } else {
+      // Reset to default
+      setPrev(current);
+      onReset(40);
+      setDone(true);
+    }
+  };
+
+  const label = done ? "↩ undo" : "↺ reset";
+  const color = done ? "#a0c8ff" : "#606080";
+  const border = done ? "#2a5080" : "#32324a";
+
+  return (
+    <button
+      onClick={handleClick}
+      title={done ? "Undo reset" : "Reset curve to default (40%)"}
+      style={{
+        flexShrink:0, padding:"4px 9px", marginBottom:1,
+        background: done ? "#0e1e38" : "transparent",
+        border:`1px solid ${border}`,
+        borderRadius:5, color, cursor:"pointer",
+        fontFamily:"'IBM Plex Mono',monospace", fontSize:9,
+        letterSpacing:".06em", transition:"all .2s",
+        whiteSpace:"nowrap",
+      }}>
+      {label}
+    </button>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // SLIDER WIDGET
 // ─────────────────────────────────────────────────────────────
-function SliderW({ cfg, val, onChange }) {
+function SliderW({ cfg, val, onChange, onCommit }) {
   const { label, min, max, step, unit, dec } = cfg;
   const pct = ((val-min)/(max-min))*100;
   const display = dec>0 ? val.toFixed(dec) : Math.round(val);
@@ -2196,7 +2878,9 @@ function SliderW({ cfg, val, onChange }) {
         <div className="tbg"/>
         <div className="tf" style={{width:`${pct}%`}}/>
         <input type="range" min={min} max={max} step={step} value={val}
-          onChange={e => onChange(e.target.value)}/>
+          onChange={e => onChange(e.target.value)}
+          onMouseUp={onCommit} onTouchEnd={onCommit}
+          onKeyUp={onCommit}/>
       </div>
     </div>
   );
