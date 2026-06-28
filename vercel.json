@@ -1,5 +1,14 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }],
+  "rewrites": [
+    { "source": "/product-hunt-mockup-generator", "destination": "/product-hunt-mockup-generator.html" },
+    { "source": "/saas-landing-page-screenshot-mockup", "destination": "/saas-landing-page-screenshot-mockup.html" },
+    { "source": "/app-store-screenshot-3d-mockup", "destination": "/app-store-screenshot-3d-mockup.html" },
+    { "source": "/figma-alternative-3d-mockup-generator", "destination": "/figma-alternative-3d-mockup-generator.html" },
+    { "source": "/css-3d-mockup-generator-for-developers", "destination": "/css-3d-mockup-generator-for-developers.html" },
+    { "source": "/linkedin-post-mockup-generator", "destination": "/linkedin-post-mockup-generator.html" },
+    { "source": "/twitter-x-screenshot-3d-mockup", "destination": "/twitter-x-screenshot-3d-mockup.html" },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
   "headers": [
     {
       "source": "/assets/(.*)",
