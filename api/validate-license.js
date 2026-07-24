@@ -1,5 +1,5 @@
 /**
- * Perspecto — License Key Validation
+ * Perspecto - License Key Validation
  * Vercel Serverless Function → calls Polar.sh API
  *
  * SETUP (one-time, ~5 minutes):
@@ -50,7 +50,7 @@ export default async function handler(req, res) {
     }
     return res.status(500).json({
       valid: false,
-      error: "Payment system not configured — see api/validate-license.js for setup instructions",
+      error: "Payment system not configured - see api/validate-license.js for setup instructions",
     });
   }
 
@@ -75,13 +75,13 @@ export default async function handler(req, res) {
     const err = await response.json().catch(() => ({}));
     return res.status(200).json({
       valid: false,
-      error: err.detail || "Invalid license key — check for typos and try again",
+      error: err.detail || "Invalid license key - check for typos and try again",
     });
   } catch (error) {
     console.error("License validation error:", error);
     return res.status(500).json({
       valid: false,
-      error: "Validation service unavailable — please try again in a moment",
+      error: "Validation service unavailable - please try again in a moment",
     });
   }
 }
