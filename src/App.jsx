@@ -30,6 +30,7 @@ const NUMERIC_KEYS = new Set([
 const HISTORY_KEYS = [
   "perspective","rotateX","rotateY","rotateZ","shadowIntensity",
   "layerSep","bgBlur","glassBorder","showFrame","curveScreen","curveIntensity",
+  "flipH","flipV",
 ];
 const MAX_HISTORY = 30;
 
@@ -40,6 +41,12 @@ const POLAR_CHECKOUT_URL = "https://buy.polar.sh/polar_cl_oeLifbHWcFZb6E5gss5PW6
 const LS_PRO_KEY      = "perspecto_pro";
 const LS_EXPORT_KEY   = "perspecto_exports";
 const LS_PRESETS_KEY  = "perspecto_saved_presets";
+
+// !! CHANGE THIS to your own secret before deploying. Visiting the site
+// once with ?owner=<this value> permanently unlocks Pro on that browser
+// (saved to localStorage, same as a real license key would). Keep this
+// value private - anyone who knows it can unlock Pro for free.
+const OWNER_KEY = "5B9L-vyMLfTHGtq3";
 
 const EXPORT_SCALES = [
   { label: "1×", value: 1, pro: false },
@@ -62,6 +69,8 @@ const DEFAULTS = {
   glassBorder: false,
   showFrame: false,
   curveScreen: false,
+  flipH: false,
+  flipV: false,
   curveIntensity: 40,
   showWatermark: true,
   customWatermark: "",
@@ -391,13 +400,22 @@ function getCorners(dispW, dispH, tz, rotX, rotY, rotZ, P, cx, cy, scale) {
   });
 }
 
-function bilerp(corners, u, v) {
-  const [tl, tr, br, bl] = corners;
-  return {
-    x: (1-u)*(1-v)*tl.x + u*(1-v)*tr.x + u*v*br.x + (1-u)*v*bl.x,
-    y: (1-u)*(1-v)*tl.y + u*(1-v)*tr.y + u*v*br.y + (1-u)*v*bl.y,
-  };
+// Computes the TRUE projected position of an arbitrary interior point on
+// the plane (u,v in [0,1]) by running it through the full rotate +
+// perspective-divide pipeline directly. Bilinear interpolation of just
+// the 4 outer corners (the old approach) is only exact for an affine
+// transform - a true perspective-projected tilted plane has a rational
+// (non-linear) relationship between position-on-plane and screen
+// position, so interpolating from 4 corners alone systematically bows
+// straight interior lines into visible waves, worse the more the plane
+// is rotated. Projecting each grid point for real fixes that exactly.
+function projectPoint(dispW, dispH, tz, rotX, rotY, rotZ, P, cx, cy, scale, u, v) {
+  const hw = dispW / 2, hh = dispH / 2;
+  const x = -hw + u * dispW, y = -hh + v * dispH;
+  const [rx, ry, rz] = rotatePoint(x, y, tz, rotX, rotY, rotZ);
+  return perspDiv(rx, ry, rz, P, cx, cy, scale);
 }
+
 
 function drawAffineTriangle(ctx, src, sx0,sy0, sx1,sy1, sx2,sy2,
                                        dx0,dy0, dx1,dy1, dx2,dy2) {
@@ -417,26 +435,54 @@ function drawAffineTriangle(ctx, src, sx0,sy0, sx1,sy1, sx2,sy2,
   ctx.restore();
 }
 
-function drawProjectedLayer(ctx, src, corners, alpha, filterStr, subdivs=16) {
+function drawProjectedLayer(ctx, src, projParams, alpha, colorFilterStr, blurPx=0, subdivs=16) {
   const sw = src.naturalWidth || src.width;
   const sh = src.naturalHeight || src.height;
+  const { dispW, dispH, tz, rotX, rotY, rotZ, P, cx, cy, scale } = projParams;
+  const pp = (u, v) => projectPoint(dispW, dispH, tz, rotX, rotY, rotZ, P, cx, cy, scale, u, v);
+
+  const paintTriangles = (targetCtx) => {
+    for (let yi=0; yi<subdivs; yi++) {
+      for (let xi=0; xi<subdivs; xi++) {
+        const u0=xi/subdivs, u1=(xi+1)/subdivs;
+        const v0=yi/subdivs, v1=(yi+1)/subdivs;
+        const p00=pp(u0,v0), p10=pp(u1,v0);
+        const p01=pp(u0,v1), p11=pp(u1,v1);
+        drawAffineTriangle(targetCtx,src,
+          u0*sw,v0*sh, u1*sw,v0*sh, u0*sw,v1*sh,
+          p00.x,p00.y, p10.x,p10.y, p01.x,p01.y);
+        drawAffineTriangle(targetCtx,src,
+          u1*sw,v0*sh, u1*sw,v1*sh, u0*sw,v1*sh,
+          p10.x,p10.y, p11.x,p11.y, p01.x,p01.y);
+      }
+    }
+  };
+
+  if (blurPx > 0) {
+    // Blur must be applied to the whole composited layer in a single
+    // pass. Applying ctx.filter blur PER TRIANGLE (each already clipped
+    // to a tiny region via drawAffineTriangle's own ctx.clip()) makes the
+    // blur sample mostly-transparent pixels from outside that triangle's
+    // own clip boundary, washing the entire layer into a nearly
+    // featureless gradient instead of a soft copy of the real content.
+    const tmp = document.createElement("canvas");
+    tmp.width = ctx.canvas.width;
+    tmp.height = ctx.canvas.height;
+    const tctx = tmp.getContext("2d");
+    if (colorFilterStr) tctx.filter = colorFilterStr;
+    paintTriangles(tctx);
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.filter = `blur(${blurPx}px)`;
+    ctx.drawImage(tmp, 0, 0);
+    ctx.restore();
+    return;
+  }
+
   ctx.save();
   ctx.globalAlpha = alpha;
-  if (filterStr) ctx.filter = filterStr;
-  for (let yi=0; yi<subdivs; yi++) {
-    for (let xi=0; xi<subdivs; xi++) {
-      const u0=xi/subdivs, u1=(xi+1)/subdivs;
-      const v0=yi/subdivs, v1=(yi+1)/subdivs;
-      const p00=bilerp(corners,u0,v0), p10=bilerp(corners,u1,v0);
-      const p01=bilerp(corners,u0,v1), p11=bilerp(corners,u1,v1);
-      drawAffineTriangle(ctx,src,
-        u0*sw,v0*sh, u1*sw,v0*sh, u0*sw,v1*sh,
-        p00.x,p00.y, p10.x,p10.y, p01.x,p01.y);
-      drawAffineTriangle(ctx,src,
-        u1*sw,v0*sh, u1*sw,v1*sh, u0*sw,v1*sh,
-        p10.x,p10.y, p11.x,p11.y, p01.x,p01.y);
-    }
-  }
+  if (colorFilterStr) ctx.filter = colorFilterStr;
+  paintTriangles(ctx);
   ctx.restore();
 }
 
@@ -469,9 +515,10 @@ function buildSourceCanvas(imgEl, showFrame) {
   return c;
 }
 
-async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWatermark="", showBadge=false }) {
+async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWatermark="", showBadge=false, liveWidth }) {
   const { perspective:P, rotateX, rotateY, rotateZ,
-          shadowIntensity, layerSep, showFrame, exportBg, exportBgColor } = ctrl;
+          shadowIntensity, layerSep, showFrame, exportBg, exportBgColor,
+          flipH, flipV, glassBorder } = ctrl;
 
   const src = buildSourceCanvas(imgEl, showFrame);
   const ar = src.width / src.height;
@@ -492,6 +539,25 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWaterma
   }
   const PAD = 150;
 
+  // The live preview's perspective/layerSep values are tuned against the
+  // on-screen CSS-rendered width of the image (typically 400-800px). The
+  // export builds the same 3D scene at a much higher internal resolution
+  // (up to 1800px+), so using those same raw pixel values unscaled makes
+  // the perspective distance comparatively much smaller relative to the
+  // object - a classic "wide lens too close" distortion. This produces
+  // wildly oversized/skewed depth-ghost layers that don't match what's
+  // shown in the editor. Scaling P and the depth offset by the ratio of
+  // export resolution to live CSS width keeps the exact same visual
+  // proportions the person tuned by eye, at any export resolution.
+  const liveW = (liveWidth || imgEl.offsetWidth || imgEl.clientWidth || dispW) || dispW;
+  const projScale = liveW > 0 ? dispW / liveW : 1;
+  const Pz = P * projScale;
+  // Combined factor from "live CSS pixels" (what every blur/offset/border
+  // formula below was tuned against) to final raster canvas pixels -
+  // accounts for both the export's larger working resolution (projScale)
+  // and the retina export multiplier (scale).
+  const visualScale = projScale * scale;
+
   // Canvas size must be based on the ACTUAL projected bounding box of the
   // rotated shape, not a flat assumption. A fixed padding around the
   // unrotated width/height works fine for mild single-axis tilts, but at
@@ -500,7 +566,7 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWaterma
   // the rotated shape against the canvas edges, making it look far more
   // skewed/cropped in the export than it appeared in the live preview.
   const rawCorners = [0, -layerSep, layerSep].flatMap(tz =>
-    getCorners(dispW, dispH, tz, rotateX, rotateY, rotateZ, P, 0, 0, 1)
+    getCorners(dispW, dispH, tz*projScale, rotateX, rotateY, rotateZ, Pz, 0, 0, 1)
   );
   const xs = rawCorners.map(p => p.x);
   const ys = rawCorners.map(p => p.y);
@@ -522,6 +588,13 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWaterma
   canvas.width = cW; canvas.height = cH;
   const ctx = canvas.getContext("2d");
 
+  // Mirror - scoped to the mockup content only (background, shadow, all
+  // depth layers) via save/restore. Watermark and badge text are drawn
+  // AFTER restore, in normal orientation, so they never render backwards.
+  ctx.save();
+  if (flipH) { ctx.translate(cW, 0); ctx.scale(-1, 1); }
+  if (flipV) { ctx.translate(0, cH); ctx.scale(1, -1); }
+
   if (exportBg === "dark") {
     ctx.fillStyle = "#09090c"; ctx.fillRect(0,0,cW,cH);
   } else if (exportBg === "light") {
@@ -538,13 +611,18 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWaterma
     ctx.fillRect(0,0,cW,cH);
   }
 
-  const gc = (tz) => getCorners(dispW, dispH, tz, rotateX, rotateY, rotateZ, P, cx, cy, scale);
+  const gc = (tz) => getCorners(dispW, dispH, tz*projScale, rotateX, rotateY, rotateZ, Pz, cx, cy, scale);
+  const proj = (tz) => ({ dispW, dispH, tz: tz*projScale,
+    rotX: rotateX, rotY: rotateY, rotZ: rotateZ, P: Pz, cx, cy, scale });
 
-  // Shadow
+  // Shadow - coefficients match the live preview's sY/sB/sO exactly
+  // (28 / 90 / 0.72), which were previously different, unrelated numbers
+  // here (24 / 55 / 0.6), causing the drop shadow to look noticeably
+  // different in export than what was tuned by eye in the editor.
   if (shadowIntensity > 0) {
-    const sY = shadowIntensity * 24 * scale;
-    const sBlur = shadowIntensity * 55;
-    const sOp = shadowIntensity * 0.6;
+    const sY = shadowIntensity * 28 * visualScale;
+    const sBlur = shadowIntensity * 90 * visualScale;
+    const sOp = shadowIntensity * 0.72;
     const bc = gc(0).map(p => ({ x:p.x, y:p.y+sY }));
     ctx.save();
     ctx.filter = `blur(${sBlur}px)`;
@@ -556,23 +634,74 @@ async function renderExport({ imgEl, ctrl, showWatermark, scale=2, customWaterma
     ctx.restore();
   }
 
-  // Behind layer
+  // Behind layer - coefficients match the live-preview CSS exactly
   if (layerSep > 0) {
-    const blur = Math.max(8, layerSep * 0.18);
-    const op = Math.min(0.55, 0.12 + layerSep * 0.003);
-    drawProjectedLayer(ctx, src, gc(-layerSep), op,
-      `blur(${blur}px) brightness(0.4) saturate(1.6)`, 10);
+    const blur = Math.max(8, layerSep * 0.18) * visualScale;
+    const op = Math.min(0.58, 0.12 + layerSep * 0.003);
+    drawProjectedLayer(ctx, src, proj(-layerSep), op,
+      "brightness(0.42) saturate(1.6)", blur, 10);
   }
 
   // Base layer
-  drawProjectedLayer(ctx, src, gc(0), 1, null, 22);
+  drawProjectedLayer(ctx, src, proj(0), 1, null, 0, 22);
 
-  // Glass layer
+  // Glass layer - coefficients match the live-preview CSS exactly,
+  // including its mix-blend-mode:screen (previously missing here, using
+  // plain alpha compositing instead - which looks visibly flatter/more
+  // washed than the lightening "screen" blend the live preview uses).
   if (layerSep > 0) {
-    const op = Math.min(0.18, 0.03 + layerSep * 0.001);
-    drawProjectedLayer(ctx, src, gc(layerSep), op,
-      "brightness(1.6) saturate(0.3)", 8);
+    const op = Math.min(0.22, 0.03 + layerSep * 0.0013);
+    ctx.save();
+    ctx.globalCompositeOperation = "screen";
+    drawProjectedLayer(ctx, src, proj(layerSep), op,
+      "brightness(1.6) saturate(0.3)", 0, 8);
+    ctx.restore();
   }
+
+  // Glass pane overlay - diagonal gradient tint (always present when
+  // layerSep>0 in the live preview, independent of the glassBorder
+  // toggle - previously missing entirely from this export) plus the
+  // border+glow (only when glassBorder is on). Same plane as the glass
+  // ghost layer drawn just above (translateZ(layerSep) in the preview).
+  if (layerSep > 0) {
+    const fc = gc(layerSep);
+    ctx.save();
+    ctx.beginPath();
+    fc.forEach((p,i) => i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+    ctx.closePath();
+    ctx.clip();
+    const grad = ctx.createLinearGradient(fc[0].x, fc[0].y, fc[2].x, fc[2].y);
+    grad.addColorStop(0, `rgba(255,255,255,${Math.min(0.07, layerSep*0.0004)})`);
+    grad.addColorStop(0.5, "rgba(255,255,255,0.007)");
+    grad.addColorStop(1, `rgba(160,140,255,${Math.min(0.04, layerSep*0.0002)})`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.restore();
+  }
+
+  // Glass Edge Glow - border + soft halo around the SAME forward glass
+  // pane drawn just above (translateZ(layerSep) in the live preview),
+  // not the base image. The live preview only renders this pane - and
+  // therefore the glow - when layerSep > 0, so we match that here too.
+  // Formulas match the live-preview .glassBorder CSS exactly.
+  if (glassBorder && layerSep > 0) {
+    const fc = gc(layerSep);
+    const borderAlpha = Math.min(0.30, 0.08 + layerSep * 0.0016);
+    const glowAlpha = Math.min(0.2, layerSep * 0.0016);
+    const glowBlur = Math.min(22, layerSep * 0.28) * visualScale;
+    ctx.save();
+    ctx.beginPath();
+    fc.forEach((p,i) => i===0 ? ctx.moveTo(p.x,p.y) : ctx.lineTo(p.x,p.y));
+    ctx.closePath();
+    ctx.shadowColor = `rgba(160,160,255,${glowAlpha})`;
+    ctx.shadowBlur = glowBlur;
+    ctx.strokeStyle = `rgba(255,255,255,${borderAlpha})`;
+    ctx.lineWidth = Math.max(1, visualScale);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  ctx.restore(); // end of mirrored content - watermark/badge draw upright below
 
   // Watermark - custom text for Pro users, default for free
   if (showWatermark) {
@@ -721,8 +850,22 @@ export default function App() {
   // ── Load pro status + export count + saved presets ──────────
   useEffect(() => {
     try {
-      const pro = localStorage.getItem(LS_PRO_KEY);
-      if (pro) setIsPro(true);
+      const params = new URLSearchParams(window.location.search);
+      const ownerParam = params.get("owner");
+      if (ownerParam && ownerParam === OWNER_KEY) {
+        localStorage.setItem(LS_PRO_KEY, "1");
+        setIsPro(true);
+        // One-time use: strip the secret from the URL/history once applied,
+        // so it isn't left sitting visible in the address bar or shared
+        // accidentally via a screenshot or browser history entry.
+        params.delete("owner");
+        const rest = params.toString();
+        window.history.replaceState({}, "",
+          window.location.pathname + (rest ? `?${rest}` : "") + window.location.hash);
+      } else {
+        const pro = localStorage.getItem(LS_PRO_KEY);
+        if (pro) setIsPro(true);
+      }
       const count = parseInt(localStorage.getItem(LS_EXPORT_KEY) || "0", 10);
       setExportCount(isNaN(count) ? 0 : count);
       const presets = JSON.parse(localStorage.getItem(LS_PRESETS_KEY) || "[]");
@@ -750,12 +893,14 @@ export default function App() {
       const p = new URLSearchParams(hash);
       const m = { rx:"rotateX", ry:"rotateY", rz:"rotateZ", pv:"perspective",
                   sep:"layerSep", bl:"bgBlur", gb:"glassBorder", sf:"showFrame",
-                  cs:"curveScreen", ci:"curveIntensity", z:"zoom" };
+                  cs:"curveScreen", ci:"curveIntensity", z:"zoom",
+                  fh:"flipH", fv:"flipV" };
+      const BOOL_KEYS = new Set(["glassBorder","showFrame","flipH","flipV"]);
       const updates = {};
       for (const [short, long] of Object.entries(m)) {
         const val = p.get(short);
         if (val !== null)
-          updates[long] = (long==="glassBorder"||long==="showFrame") ? val==="1" : Number(val);
+          updates[long] = BOOL_KEYS.has(long) ? val==="1" : Number(val);
       }
       if (Object.keys(updates).length) setCtrl(prev => ({ ...prev, ...updates }));
     } catch {}
@@ -765,7 +910,8 @@ export default function App() {
   useEffect(() => {
     const m = { rotateX:"rx", rotateY:"ry", rotateZ:"rz", perspective:"pv",
                 layerSep:"sep", bgBlur:"bl", glassBorder:"gb", showFrame:"sf",
-                curveScreen:"cs", curveIntensity:"ci", zoom:"z" };
+                curveScreen:"cs", curveIntensity:"ci", zoom:"z",
+                flipH:"fh", flipV:"fv" };
     const params = new URLSearchParams();
     let hasChanges = false;
     for (const [long, short] of Object.entries(m)) {
@@ -930,7 +1076,7 @@ export default function App() {
       name,
       perspective, rotateX, rotateY, rotateZ,
       layerSep, bgBlur, glassBorder, showFrame,
-      curveScreen, curveIntensity,
+      curveScreen, curveIntensity, flipH, flipV,
     };
     persistPresets([...savedPresets, newPreset]);
     setSavePresetName("");
@@ -951,6 +1097,8 @@ export default function App() {
       showFrame: preset.showFrame,
       curveScreen: preset.curveScreen ?? false,
       curveIntensity: preset.curveIntensity ?? 40,
+      flipH: preset.flipH ?? false,
+      flipV: preset.flipV ?? false,
     }));
     showToast(`Applied "${preset.name}" ✓`);
   };
@@ -1008,6 +1156,7 @@ export default function App() {
           scale,
           customWatermark: ctrl.customWatermark || "",
           showBadge: ctrl.showBadge || false,
+          liveWidth: imgRef.current?.offsetWidth,
         });
         const blob = await new Promise(res => canvas.toBlob(res, "image/png"));
         const baseName = b.name.replace(/\.[^.]+$/, "");
@@ -1252,6 +1401,18 @@ export default function App() {
       const floatRY  = (rotateY + 5).toFixed(1);
       const hasShadow = sO > 0;
 
+      // Glass Edge Glow (mirrors the live-preview values so the exported
+      // HTML actually shows the glow when the toggle is enabled)
+      const glassBorderCSS = glassBorder
+        ? `1px solid rgba(255,255,255,${Math.min(0.30, 0.08 + sep * 0.0016).toFixed(3)})`
+        : "1px solid transparent";
+      const glassGlowCSS = glassBorder
+        ? `0 0 ${Math.min(22, sep * 0.28).toFixed(1)}px rgba(160,160,255,${Math.min(0.2, sep * 0.0016).toFixed(3)}), inset 0 1px 0 rgba(255,255,255,.1)`
+        : "none";
+      const glassBackdrop = sep > 18
+        ? `blur(${Math.min(sep * 0.09, 7).toFixed(1)}px)`
+        : "none";
+
       const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1282,7 +1443,7 @@ export default function App() {
 
     /* ── Perspecto 3D Wrapper ── */
     .perspecto-wrapper {
-      transform: perspective(${perspective}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg);
+      transform: scaleX(${flipH?-1:1}) scaleY(${flipV?-1:1}) perspective(${perspective}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg);
       transform-style: preserve-3d;
       position: relative;
       display: inline-flex;
@@ -1293,7 +1454,7 @@ export default function App() {
 
     /* Hover: gentle float - customize these values */
     .perspecto-wrapper:hover {
-      transform: perspective(${perspective}px) rotateX(${floatRX}deg) rotateY(${floatRY}deg) rotateZ(${rotateZ}deg);
+      transform: scaleX(${flipH?-1:1}) scaleY(${flipV?-1:1}) perspective(${perspective}px) rotateX(${floatRX}deg) rotateY(${floatRY}deg) rotateZ(${rotateZ}deg);
     }
 
     /* ── Base image (main layer) ── */
@@ -1349,6 +1510,10 @@ export default function App() {
         rgba(255,255,255,0.05) 0%,
         rgba(255,255,255,0.01) 50%,
         rgba(160,140,255,0.03) 100%);
+      backdrop-filter: ${glassBackdrop};
+      -webkit-backdrop-filter: ${glassBackdrop};
+      border: ${glassBorderCSS};
+      box-shadow: ${glassGlowCSS};
       pointer-events: none;
     }
 
@@ -1409,7 +1574,7 @@ export default function App() {
   const { perspective, rotateX, rotateY, rotateZ, shadowIntensity,
           layerSep, bgBlur, glassBorder, showFrame, showWatermark,
           curveScreen, curveIntensity, customWatermark, showBadge,
-          exportBg, exportBgColor, exportScale, zoom } = ctrl;
+          exportBg, exportBgColor, exportScale, zoom, flipH, flipV } = ctrl;
 
   const sY=shadowIntensity*28, sB=shadowIntensity*90,
         sS=shadowIntensity*24, sO=shadowIntensity*0.72;
@@ -1473,6 +1638,16 @@ export default function App() {
         .sl{font-size:13px;color:#c8c8e8;letter-spacing:.01em;font-family:'IBM Plex Sans',sans-serif}
         .sv{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#eeeeff;
           min-width:50px;text-align:right}
+        .sv-wrap{display:flex;align-items:baseline;gap:2px}
+        .sv-input{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#eeeeff;
+          width:52px;text-align:right;background:transparent;border:1px solid transparent;
+          border-radius:4px;padding:1px 3px;transition:border-color .15s,background .15s}
+        .sv-input:hover{border-color:#3a3a5a}
+        .sv-input:focus{outline:none;border-color:#6060d0;background:#20203a}
+        .sv-input::-webkit-outer-spin-button,.sv-input::-webkit-inner-spin-button{
+          -webkit-appearance:none;margin:0}
+        .sv-input[type=number]{-moz-appearance:textfield}
+        .sv-unit{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:#eeeeff}
         .tw{position:relative;height:18px;display:flex;align-items:center}
         .tbg{position:absolute;left:0;right:0;height:2px;background:#2a2a40;border-radius:2px;pointer-events:none}
         .tf{position:absolute;left:0;height:2px;background:linear-gradient(90deg,#4f46e5,#a5b4fc);
@@ -2282,6 +2457,25 @@ export default function App() {
               )}
             </div>
 
+            {/* ── Mirror ── */}
+            <div className="sec">
+              <div className="slbl">
+                <svg width="9" height="9" viewBox="0 0 12 12" style={{opacity:.4,flexShrink:0}} fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <path d="M6 1v10M2 3l-1 1 1 1M10 3l1 1-1 1"/>
+                </svg>
+                Mirror
+              </div>
+              <div style={{fontSize:12.5,color:"#a0a0cc",fontFamily:"'IBM Plex Sans',sans-serif",lineHeight:1.55,marginBottom:3}}>
+                Once it looks right, flip it - the whole composed mockup mirrors in one click.
+              </div>
+              <Toggle
+                icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke={flipH?"#818cf8":"#7070a0"} strokeWidth="1.5" strokeLinecap="round"><path d="M6 1v10"/><path d="M2 4L1 6l1 2"/><path d="M10 4l1 2-1 2"/></svg>}
+                label="Flip Horizontal" val={flipH} onToggle={() => { set("flipH",!flipH); requestAnimationFrame(commitHistory); }}/>
+              <Toggle
+                icon={<svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke={flipV?"#818cf8":"#7070a0"} strokeWidth="1.5" strokeLinecap="round"><path d="M1 6h10"/><path d="M4 2L6 1l2 1"/><path d="M4 10l2 1 2-1"/></svg>}
+                label="Flip Vertical" val={flipV} onToggle={() => { set("flipV",!flipV); requestAnimationFrame(commitHistory); }}/>
+            </div>
+
             {/* ── Export ── */}
             <div className="sec">
               <div className="slbl"><Download size={9} style={{opacity:.4,flexShrink:0}}/>Export</div>
@@ -2718,6 +2912,8 @@ export default function App() {
                   showFrame={showFrame}
                   curveScreen={curveScreen}
                   curveIntensity={curveIntensity}
+                  flipH={flipH}
+                  flipV={flipV}
                 />
               </div>
             </div>
@@ -2789,7 +2985,7 @@ function LogoMark() {
 function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
                       layerSep, shadowY, shadowBlur, shadowSpread, shadowOpacity,
                       shadowIntensity, glassBorder, showFrame,
-                      curveScreen, curveIntensity }) {
+                      curveScreen, curveIntensity, flipH, flipV }) {
 
   // Compute frame bar height relative to image natural size → we'll use 4.4% of CSS width
   // We don't know exact CSS render width up front, so use a ref to measure
@@ -2809,7 +3005,7 @@ function LayerStack({ image, imgRef, perspective, rotateX, rotateY, rotateZ,
   }, [showFrame, image]);
 
   const wrap = {
-    transform:`perspective(${perspective}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg)`,
+    transform:`scaleX(${flipH?-1:1}) scaleY(${flipV?-1:1}) perspective(${perspective}px) rotateX(${rotateX}deg) rotateY(${rotateY}deg) rotateZ(${rotateZ}deg)`,
     transformStyle:"preserve-3d",
     position:"relative",
     display:"inline-flex",
@@ -3004,11 +3200,40 @@ function SliderW({ cfg, val, onChange, onCommit }) {
   const { label, min, max, step, unit, dec, note } = cfg;
   const pct = ((val-min)/(max-min))*100;
   const display = dec>0 ? val.toFixed(dec) : Math.round(val);
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(String(display));
+
+  useEffect(() => { if (!editing) setText(String(display)); }, [display, editing]);
+
+  const commitText = () => {
+    let n = parseFloat(text);
+    if (Number.isNaN(n)) n = val;
+    n = Math.min(max, Math.max(min, n));
+    onChange(n);
+    setEditing(false);
+    onCommit && onCommit();
+  };
+
   return (
     <div className="sw">
       <div className="sm">
         <span className="sl">{label}</span>
-        <span className="sv">{display}{unit}</span>
+        <span className="sv-wrap">
+          <input
+            type="number"
+            className="sv-input"
+            value={editing ? text : display}
+            min={min} max={max} step={step}
+            onFocus={e => { setEditing(true); setText(String(display)); e.target.select(); }}
+            onChange={e => setText(e.target.value)}
+            onBlur={commitText}
+            onKeyDown={e => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") { setEditing(false); setText(String(display)); e.currentTarget.blur(); }
+            }}
+          />
+          {unit && <span className="sv-unit">{unit}</span>}
+        </span>
       </div>
       <div className="tw">
         <div className="tbg"/>
